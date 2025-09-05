@@ -36,7 +36,6 @@ class RunConfig:
         for k, v in self.providers.items():
             d = asdict(v)
             ak = d.get("api_key")
-            # Do not expose API keys at all in public config
             if ak is not None:
                 d["api_key"] = "REDACTED"
             provs[k] = d

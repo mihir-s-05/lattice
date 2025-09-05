@@ -20,7 +20,6 @@ def _is_sensitive_key(key: str) -> bool:
     k = key.lower()
     if k in SENSITIVE_KEYS:
         return True
-    # Heuristic: environment-like names
     return any(t in k for t in ["api_key", "apikey", "token", "secret", "password"])
 
 

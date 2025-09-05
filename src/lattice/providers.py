@@ -48,6 +48,8 @@ class OpenAICompatProvider:
         model: Optional[str] = None,
         temperature: float = 0.2,
         max_tokens: Optional[int] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[str] = None,
     ) -> Tuple[str, Dict[str, Any]]:
         url = self.cfg.base_url.rstrip("/") + "/chat/completions"
         body: Dict[str, Any] = {
@@ -57,6 +59,10 @@ class OpenAICompatProvider:
         }
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
+        if tools:
+            body["tools"] = tools
+        if tool_choice:
+            body["tool_choice"] = tool_choice
 
         resp = requests.post(url, headers=self._headers(), params=self._params(), json=body, timeout=60)
         try:
@@ -81,6 +87,8 @@ def call_with_fallback(
     max_tokens: Optional[int],
     logger,
     retries: int = 2,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: Optional[str] = None,
 ) -> Tuple[str, str, str, Dict[str, Any], int]:
     last_err: Optional[str] = None
     attempt = 0
@@ -92,7 +100,14 @@ def call_with_fallback(
         while attempt <= retries:
             try:
                 t0 = time.time()
-                out_text, raw = prov.chat_completion(messages=messages, model=model, temperature=temperature, max_tokens=max_tokens)
+                out_text, raw = prov.chat_completion(
+                    messages=messages,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                )
                 dt = time.time() - t0
                 logger.log(
                     "model_call",
@@ -100,6 +115,8 @@ def call_with_fallback(
                     model=model,
                     base_url=cfg.base_url,
                     messages=messages,
+                    tools=tools,
+                    tool_choice=tool_choice,
                     output=out_text,
                     raw_response=raw,
                     duration_sec=round(dt, 3),
@@ -120,6 +137,8 @@ def call_with_fallback(
                     model=model,
                     base_url=cfg.base_url,
                     messages=messages,
+                    tools=tools,
+                    tool_choice=tool_choice,
                     output=None,
                     raw_response=None,
                     duration_sec=None,

@@ -2,6 +2,7 @@ import argparse
 import os
 import sys
 import time
+import json
 
 from .worker import WorkerRunner
 from .secrets import redact_secrets
@@ -42,14 +43,76 @@ def cmd_logs(args: argparse.Namespace) -> int:
     if not os.path.exists(log_path):
         print(f"No log file found: {log_path}")
         return 1
-    if args.follow:
-        tail_follow(log_path)
-        return 0
+    if args.output_only:
+        try:
+            def handle_obj(obj: dict):
+                if obj.get("event") == "model_call":
+                    out = obj.get("output")
+                    if out is None:
+                        return
+                    if isinstance(out, str) and out.strip() == "":
+                        return
+                    ts = obj.get("ts", "")
+                    prov = obj.get("provider", "")
+                    model = obj.get("model", "")
+                    header = f"[{ts}] {prov} {model}".strip()
+                    print(header)
+                    print("-" * len(header))
+                    try:
+                        print(out)
+                    except Exception:
+                        sys.stdout.write(str(out) + "\n")
+                    print()
+
+            if args.follow:
+                with open(log_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        try:
+                            obj = json.loads(line)
+                        except Exception:
+                            continue
+                        handle_obj(obj)
+                    while True:
+                        line = f.readline()
+                        if not line:
+                            time.sleep(0.25)
+                            continue
+                        try:
+                            obj = json.loads(line)
+                        except Exception:
+                            continue
+                        handle_obj(obj)
+            else:
+                with open(log_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        try:
+                            obj = json.loads(line)
+                        except Exception:
+                            continue
+                        handle_obj(obj)
+            return 0
+        except KeyboardInterrupt:
+            return 0
+        except Exception as e:
+            print(f"ERROR reading log: {e}")
+            return 1
+    else:
+        if args.follow:
+            tail_follow(log_path)
+            return 0
+        try:
+            with open(log_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    sys.stdout.write(line)
+            sys.stdout.flush()
+            return 0
+        except Exception as e:
+            print(f"ERROR reading log: {e}")
+            return 1
 
 
 def _scrub_run_dir(run_dir: str) -> int:
     changed = 0
-    # Scrub config.json
     cfg_path = os.path.join(run_dir, "config.json")
     if os.path.exists(cfg_path):
         try:
@@ -64,7 +127,6 @@ def _scrub_run_dir(run_dir: str) -> int:
                 pass
         except Exception:
             pass
-    # Scrub run.jsonl
     log_path = os.path.join(run_dir, "run.jsonl")
     if os.path.exists(log_path):
         try:
@@ -98,7 +160,6 @@ def cmd_scrub(args: argparse.Namespace) -> int:
         changed = _scrub_run_dir(target)
         print(f"Scrubbed {args.run_id}: {changed} files redacted")
         return 0
-    # Scrub all runs
     total = 0
     for name in os.listdir(base):
         run_dir = os.path.join(base, name)
@@ -120,6 +181,7 @@ def build_parser() -> argparse.ArgumentParser:
     pl = sub.add_parser("logs", help="Show logs for a run")
     pl.add_argument("run_id", help="Run ID, e.g., run-20240101-000000-abc123")
     pl.add_argument("--follow", "-f", action="store_true", help="Follow (tail -f) the log file")
+    pl.add_argument("--output-only", "-O", action="store_true", help="Show only model outputs, nicely formatted")
     pl.set_defaults(func=cmd_logs)
 
     ps = sub.add_parser("scrub", help="Redact secrets from existing run logs/configs")

@@ -17,7 +17,6 @@ class RunLogger:
 
     def log(self, event: str, **fields: Any) -> None:
         rec: Dict[str, Any] = {"ts": self._ts(), "event": event}
-        # Redact any sensitive info before writing to disk
         rec.update(redact_secrets(fields))
         line = json.dumps(rec, ensure_ascii=False)
         with open(self.log_path, "a", encoding="utf-8") as f:
