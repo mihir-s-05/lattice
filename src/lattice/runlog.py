@@ -3,6 +3,8 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from .secrets import redact_secrets
+
 
 class RunLogger:
     def __init__(self, run_dir: str) -> None:
@@ -15,7 +17,8 @@ class RunLogger:
 
     def log(self, event: str, **fields: Any) -> None:
         rec: Dict[str, Any] = {"ts": self._ts(), "event": event}
-        rec.update(fields)
+        # Redact any sensitive info before writing to disk
+        rec.update(redact_secrets(fields))
         line = json.dumps(rec, ensure_ascii=False)
         with open(self.log_path, "a", encoding="utf-8") as f:
             f.write(line + "\n")

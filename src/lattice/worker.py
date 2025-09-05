@@ -12,6 +12,7 @@ from .config import RunConfig, load_run_config
 from .providers import call_with_fallback, ProviderError
 from .rag import RagIndex
 from .runlog import RunLogger
+from .secrets import redact_secrets
 
 
 def gen_run_id() -> str:
@@ -54,26 +55,29 @@ class WorkerRunner:
         for k in keys:
             v = os.environ.get(k)
             if v is not None:
-                if "KEY" in k and len(v) > 8:
-                    snap[k] = v[:4] + "…" + v[-4:]
+                # Always redact any key-like values from env snapshot
+                if any(tok in k for tok in ["KEY", "TOKEN", "SECRET", "PASSWORD"]):
+                    snap[k] = "REDACTED"
                 else:
                     snap[k] = v
-        return snap
+        # Extra safety: apply deep redaction too
+        return redact_secrets(snap)
 
     def run(self, prompt: str, use_rag: Optional[bool] = None) -> Dict[str, str]:
         self.cfg = load_run_config(self.run_id, prompt)
         if use_rag is not None:
             self.cfg.use_rag = use_rag
 
-        cfg_json = self.cfg.to_json()
+        # Persist only the redacted/public version of the config
+        cfg_public = self.cfg.to_public_dict()
         with open(os.path.join(self.run_dir, "config.json"), "w", encoding="utf-8") as f:
-            f.write(cfg_json)
+            f.write(json.dumps(cfg_public, indent=2))
 
         self.logger.log(
             "run_start",
             run_id=self.run_id,
             run_dir=self.run_dir,
-            config=json.loads(cfg_json),
+            config=cfg_public,
             env=self._snapshot_env(),
         )
 

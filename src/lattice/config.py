@@ -36,8 +36,9 @@ class RunConfig:
         for k, v in self.providers.items():
             d = asdict(v)
             ak = d.get("api_key")
-            if ak:
-                d["api_key"] = (ak[:4] + "…" + ak[-4:]) if len(ak) > 8 else "…"
+            # Do not expose API keys at all in public config
+            if ak is not None:
+                d["api_key"] = "REDACTED"
             provs[k] = d
         return {
             "run_id": self.run_id,

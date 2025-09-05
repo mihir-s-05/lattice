@@ -4,6 +4,7 @@ import sys
 import time
 
 from .worker import WorkerRunner
+from .secrets import redact_secrets
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -44,10 +45,67 @@ def cmd_logs(args: argparse.Namespace) -> int:
     if args.follow:
         tail_follow(log_path)
         return 0
-    else:
-        with open(log_path, "r", encoding="utf-8") as f:
-            sys.stdout.write(f.read())
+
+
+def _scrub_run_dir(run_dir: str) -> int:
+    changed = 0
+    # Scrub config.json
+    cfg_path = os.path.join(run_dir, "config.json")
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                data = f.read()
+            try:
+                obj = redact_secrets(__import__("json").loads(data))
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    __import__("json").dump(obj, f, indent=2)
+                changed += 1
+            except Exception:
+                pass
+        except Exception:
+            pass
+    # Scrub run.jsonl
+    log_path = os.path.join(run_dir, "run.jsonl")
+    if os.path.exists(log_path):
+        try:
+            new_lines = []
+            with open(log_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        obj = __import__("json").loads(line)
+                        obj = redact_secrets(obj)
+                        new_lines.append(__import__("json").dumps(obj, ensure_ascii=False))
+                    except Exception:
+                        new_lines.append(line.rstrip("\n"))
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(new_lines) + "\n")
+            changed += 1
+        except Exception:
+            pass
+    return changed
+
+
+def cmd_scrub(args: argparse.Namespace) -> int:
+    base = os.path.join(os.getcwd(), "runs")
+    if not os.path.isdir(base):
+        print("No runs directory found")
         return 0
+    if args.run_id:
+        target = os.path.join(base, args.run_id)
+        if not os.path.isdir(target):
+            print(f"Run dir not found: {target}")
+            return 1
+        changed = _scrub_run_dir(target)
+        print(f"Scrubbed {args.run_id}: {changed} files redacted")
+        return 0
+    # Scrub all runs
+    total = 0
+    for name in os.listdir(base):
+        run_dir = os.path.join(base, name)
+        if os.path.isdir(run_dir):
+            total += _scrub_run_dir(run_dir)
+    print(f"Scrubbed all runs: {total} files redacted")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -63,6 +121,10 @@ def build_parser() -> argparse.ArgumentParser:
     pl.add_argument("run_id", help="Run ID, e.g., run-20240101-000000-abc123")
     pl.add_argument("--follow", "-f", action="store_true", help="Follow (tail -f) the log file")
     pl.set_defaults(func=cmd_logs)
+
+    ps = sub.add_parser("scrub", help="Redact secrets from existing run logs/configs")
+    ps.add_argument("run_id", nargs="?", help="Specific run ID to scrub (default: all)")
+    ps.set_defaults(func=cmd_scrub)
 
     return p
 
