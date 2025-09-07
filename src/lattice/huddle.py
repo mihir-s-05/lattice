@@ -38,6 +38,8 @@ class HuddleRecord:
     attendees: List[str]
     transcript_path: str
     decisions: List[str]
+    mode: str = "dialog"
+    auto_decision: bool = False
 
 
 def _coerce_list_str(x: Any) -> List[str]:
@@ -173,12 +175,17 @@ def save_huddle(
     questions: List[str],
     notes: str,
     decisions: List[DecisionSummary],
+    *,
+    hud_id: Optional[str] = None,
+    mode: str = "dialog",
+    auto_decision: bool = False,
+    messages: Optional[List[Dict[str, str]]] = None,
 ) -> Tuple[HuddleRecord, str, str]:
     """Persist huddle transcript and record, index transcript for RAG.
 
     Returns: (record, transcript_rel_path, record_rel_path)
     """
-    hud_id = f"hud_{ulid()}"
+    hud_id = hud_id or f"hud_{ulid()}"
     rel_dir = HUDDLE_DIR
     abs_dir = os.path.join(run_dir, rel_dir)
     ensure_dir(abs_dir)
@@ -187,12 +194,25 @@ def save_huddle(
     transcript = [
         f"# Huddle: {topic}",
         f"Attendees: {', '.join(attendees)}",
+        f"Mode: {mode}",
         "",
         "## Questions",
         "".join([f"- {q}\n" for q in questions]) if questions else "- (none)\n",
+        ]
+    if messages:
+        transcript += [
+            "",
+            "## Transcript",
+        ]
+        for m in messages:
+            ts = m.get("ts") or ""
+            speaker = m.get("from") or "?"
+            content = (m.get("content") or "").rstrip()
+            transcript.append(f"- [{ts}] {speaker}: {content}")
+    transcript += [
         "",
         "## Notes",
-        notes.strip() + "\n",
+        (notes.strip() + "\n") if notes else "",
     ]
     with open(transcript_abs, "w", encoding="utf-8") as f:
         f.write("\n".join(transcript))
@@ -207,6 +227,8 @@ def save_huddle(
         attendees=attendees,
         transcript_path=transcript_rel,
         decisions=[d.id for d in decisions],
+        mode=mode,
+        auto_decision=auto_decision,
     )
     record_rel = os.path.join(rel_dir, f"{hud_id}.json")
     record_abs = os.path.join(run_dir, record_rel)

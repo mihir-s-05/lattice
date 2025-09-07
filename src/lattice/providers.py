@@ -89,13 +89,14 @@ def call_with_fallback(
     retries: int = 2,
     tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Optional[str] = None,
+    model_overrides: Optional[Dict[str, str]] = None,
 ) -> Tuple[str, str, str, Dict[str, Any], int]:
     last_err: Optional[str] = None
     attempt = 0
     for name in order:
         cfg = providers[name]
         prov = OpenAICompatProvider(cfg)
-        model = cfg.model
+        model = (model_overrides or {}).get(name) or cfg.model
         attempt = 0
         while attempt <= retries:
             try:
@@ -122,6 +123,7 @@ def call_with_fallback(
                     duration_sec=round(dt, 3),
                     error=None,
                     retries=attempt,
+                    fallback_chain=order,
                 )
                 return name, cfg.base_url, model, raw, attempt
             except Exception as e:
@@ -144,6 +146,7 @@ def call_with_fallback(
                     duration_sec=None,
                     error=str(e),
                     retries=attempt,
+                    fallback_chain=order,
                 )
                 if attempt <= retries and transient:
                     time.sleep(min(2 ** attempt, 8))

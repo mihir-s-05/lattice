@@ -4,20 +4,60 @@ import sys
 import time
 import json
 
-from .worker import WorkerRunner
+from .router import RouterRunner
 from .secrets import redact_secrets
 
 
 def cmd_run(args: argparse.Namespace) -> int:
     prompt = args.prompt
-    runner = WorkerRunner(cwd=os.getcwd())
+    if getattr(args, "router_provider", None):
+        os.environ["LATTICE_ROUTER_PROVIDER"] = args.router_provider
+    if getattr(args, "router_model", None):
+        os.environ["LATTICE_ROUTER_MODEL"] = args.router_model
+    if getattr(args, "huddles", None):
+        os.environ["LATTICE_HUDDLES"] = args.huddles
+    runner = RouterRunner(cwd=os.getcwd())
     try:
-        result = runner.run(prompt=prompt, use_rag=(not args.no_rag))
+        result = runner.run(goal=prompt)
     except Exception as e:
         print(f"ERROR: {e}")
         return 1
-    print(result["artifact_path"])
-    print(result["log_path"])
+    summary_path = result.get("summary_path")
+    print("Run complete.")
+    print(f"- artifacts: {result.get('artifact_dir')}")
+    print(f"- logs:      {result.get('log_path')}")
+    if summary_path and os.path.exists(summary_path):
+        print(f"- summary:   {summary_path}")
+        try:
+            with open(summary_path, "r", encoding="utf-8") as f:
+                s = json.load(f)
+            print("- contracts: ", ", ".join(s.get("contract_reports", [])[:3]))
+            print("- snapshots: ", s.get("plan_snapshots"))
+            run_dir = os.path.dirname(os.path.dirname(summary_path))
+            log_path = os.path.join(run_dir, "run.jsonl")
+            router_line = None
+            agent_counts = {}
+            if os.path.exists(log_path):
+                with open(log_path, "r", encoding="utf-8") as lf:
+                    for line in lf:
+                        try:
+                            obj = json.loads(line)
+                        except Exception:
+                            continue
+                        if obj.get("event") == "router_llm_turn":
+                            router_line = obj
+                        if obj.get("event") == "agent_model_turn":
+                            prov = obj.get("provider")
+                            agent_counts[prov] = agent_counts.get(prov, 0) + 1
+            if router_line:
+                print(f"- provider mix: Router: {router_line.get('provider')}/{router_line.get('model')}")
+            if agent_counts:
+                total = sum(agent_counts.values())
+                lm = agent_counts.get("lmstudio", 0)
+                primary = max(((p, c) for p, c in agent_counts.items() if p != "lmstudio"), key=lambda x: x[1], default=("?", 0))[0]
+                print(f"                Agents: {primary} (+ {lm} lmstudio fallbacks)")
+        except Exception:
+            pass
     return 0
 
 
@@ -170,12 +210,15 @@ def cmd_scrub(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="lattice", description="LATTICE worker runner")
+    p = argparse.ArgumentParser(prog="lattice", description="LATTICE multi-agent router")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     pr = sub.add_parser("run", help="Run a single worker turn")
     pr.add_argument("prompt", help="Prompt text, wrap in quotes")
     pr.add_argument("--no-rag", action="store_true", help="Disable RAG for this run")
+    pr.add_argument("--router-provider", dest="router_provider", help="Router provider (e.g., groq or lmstudio)", nargs='?')
+    pr.add_argument("--router-model", dest="router_model", help="Router model id (e.g., openai/gpt-oss-120b)", nargs='?')
+    pr.add_argument("--huddles", dest="huddles", choices=["dialog", "synthesis"], help="Huddle mode: dialog or synthesis", nargs='?')
     pr.set_defaults(func=cmd_run)
 
     pl = sub.add_parser("logs", help="Show logs for a run")
