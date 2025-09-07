@@ -29,6 +29,7 @@ class DecisionSummary:
     actions: List[Dict[str, Any]] = field(default_factory=list)
     contracts: List[Dict[str, Any]] = field(default_factory=list)
     links: List[Dict[str, Any]] = field(default_factory=list)
+    sources: Optional[List[Dict[str, Any]]] = None
 
 
 @dataclass
@@ -60,6 +61,7 @@ def _normalize_decision_obj(obj: Dict[str, Any]) -> DecisionSummary:
     actions = obj.get("actions") or []
     contracts = obj.get("contracts") or []
     links = obj.get("links") or []
+    sources = obj.get("sources") or None
     return DecisionSummary(
         id=did,
         topic=topic,
@@ -70,14 +72,12 @@ def _normalize_decision_obj(obj: Dict[str, Any]) -> DecisionSummary:
         actions=actions,
         contracts=contracts,
         links=links,
+        sources=sources,
     )
 
 
 def _extract_json_objects(text: str) -> List[Dict[str, Any]]:
-    """Extract one or more JSON objects from text. Tolerates fenced blocks.
-
-    Strategy: find all top-level brace-balanced objects.
-    """
+    
     objs: List[Dict[str, Any]] = []
     buf = []
     depth = 0
@@ -142,10 +142,7 @@ def save_decisions(
     rag_index: RagIndex,
     decisions: List[DecisionSummary],
 ) -> List[Tuple[DecisionSummary, str]]:
-    """Persist decisions as JSON artifacts and index them for RAG.
-
-    Returns list of (DecisionSummary, rel_path)
-    """
+    
     out: List[Tuple[DecisionSummary, str]] = []
     for d in decisions:
         rel_dir = DECISION_DIR
@@ -181,10 +178,7 @@ def save_huddle(
     auto_decision: bool = False,
     messages: Optional[List[Dict[str, str]]] = None,
 ) -> Tuple[HuddleRecord, str, str]:
-    """Persist huddle transcript and record, index transcript for RAG.
-
-    Returns: (record, transcript_rel_path, record_rel_path)
-    """
+    
     hud_id = hud_id or f"hud_{ulid()}"
     rel_dir = HUDDLE_DIR
     abs_dir = os.path.join(run_dir, rel_dir)

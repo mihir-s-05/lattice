@@ -1,198 +1,131 @@
-LATTICE — Multi‑Agent Router, Contracts, and Stage Gates
+LATTICE — CLI Orchestrator with Weave Mode, Replanning, Provenance, and Finalization (M4)
 
-Overview
+LATTICE is a CLI‑only, single‑process orchestration runtime. It coordinates multiple agents via a deterministic Router, runs contract tests and stage gates, captures provenance, supports mid‑flight replanning, and emits a rigorous finalization report and deliverables.
 
-LATTICE is a CLI‑only, single‑process system that orchestrates multiple specialized agents through a deterministic Router. It plans work, convenes huddles to reach API/contract decisions, scaffolds backend and frontend code, defines and executes contract tests, evaluates stage gates, indexes artifacts for RAG, and logs everything as structured JSONL.
+Highlights (Milestone 4)
+- Weave mode: Hybrid execution (Ladder on the critical path + a Docs track in parallel).
+- Mid‑flight mode switching with structured reasons and huddles.
+- Provenance & citations plumbing (artifacts + RAG docs) with a knowledge signal hook.
+- Finalization pass: drift checks, decision log with inline citations, citation index, deliverables zip.
 
-Highlights
 
-- Router LLM: Planning, refinement, and huddle synthesis with provider fallback.
-- Agents: Backend, Frontend, LLM‑API, and Tests agents producing concrete artifacts.
-- Contracts & Gates: Portable JSON contract tests + boolean stage gates with traces.
-- Huddles: Dialog or synthesis modes, DecisionSummaries saved and injected into prompts.
-- Artifacts & RAG: Per‑run artifacts (`runs/<run_id>/artifacts/`), locally indexed for retrieval.
-- Logging: Full fidelity JSONL of model calls, plans, huddles, tests, gates, and artifacts.
+Getting Started
 
-Quick Start
-
-```bash
-pip install -e .
-
-# Run a goal
-lattice run "Build FE+BE skeleton for a notes app"
-
-# Pick router provider/model and huddles mode (dialog|synthesis)
-lattice run --router-provider groq \
-            --router-model openai/gpt-oss-120b \
-            --huddles synthesis \
-            "Generate a CRUD notes app"
-
-# Inspect logs and outputs
-lattice logs -O -f <run_id>
-```
-
-Requirements
-
-- Python 3.9+
-- Outbound network for Groq/Gemini, or a local LM Studio server
-- To run the backend scaffold: `fastapi`, `uvicorn` (generated in requirements.txt)
-
-Configuration (OpenAI‑compatible)
-
-```bash
-# Groq (Router LLM)
-export GROQ_API_KEY=...
-export GROQ_BASE_URL=${GROQ_BASE_URL:-https://api.groq.com/openai/v1}
-
-# Gemini (agents, via OpenAI‑compatible endpoint)
-export GEMINI_API_KEY=...
-export GEMINI_BASE_URL=${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai/}
-
-# LM Studio (local fallback)
-export LMSTUDIO_BASE_URL=${LMSTUDIO_BASE_URL:-http://localhost:1234/v1}
-```
-
-Provider Selection (role‑scoped)
-
-- Orders:
-  - `LATTICE_ROUTER_PROVIDER_ORDER=groq,lmstudio`
-  - `LATTICE_AGENT_PROVIDER_ORDER=gemini-openai-compat,lmstudio`
-- Pins (preferred provider and/or model):
-  - `LATTICE_ROUTER_PROVIDER=groq`
-  - `LATTICE_ROUTER_MODEL=openai/gpt-oss-120b`
-  - `LATTICE_AGENT_PROVIDER=gemini-openai-compat`
-  - `LATTICE_AGENT_MODEL=gemini-2.5-flash-lite`
-- Other:
-  - `LATTICE_TEMPERATURE` (default 0.2)
-  - `LATTICE_MAX_TOKENS`
-  - `LATTICE_RAG_MAX_INGEST` (default 20)
-  - `LATTICE_HUDDLES` (`dialog`|`synthesis`) — default `dialog`
+- Requirements: Python 3.9+, `requests` (installed via setup), provider credentials if using remote models.
+- Install:
+  - pip: `pip install -e .`
+  - or module: run via `python -m src.lattice.cli ...` from repo root.
 
 CLI Commands
 
-- `lattice run <prompt>`
-  - Flags: `--router-provider`, `--router-model`, `--huddles dialog|synthesis`
-  - Prints artifact dir, log path, run summary, and provider mix
-- `lattice logs <run_id>`
-  - `-O, --output-only` to show only model outputs
-  - `-f, --follow` to tail the log
-- `lattice scrub [<run_id>]`
-  - Redacts secrets in `config.json` and `run.jsonl` for one or all runs
+- lattice run "<goal>"
+  - Orchestrates Router + agents to plan, scaffold, test, evaluate gates, replan if needed, and finalize.
+  - Emits `runs/<run_id>/artifacts/*`, structured logs `run.jsonl`, PlanGraph, DecisionSummaries, knowledge journal, and a finalization report.
 
-Architecture
+- lattice logs <run_id> [--follow] [--output-only|-O]
+  - Prints the JSONL log or formatted model outputs.
 
-- Router (RouterRunner): Deterministic scheduler with two modes
-  - Ladder: contracts → backend_scaffold → frontend_scaffold → smoke_tests
-  - Tracks: single slice of all agents, then sync on tests/gates
-- Router LLM (RouterLLM):
-  - `plan_init(goal)`: produce a compact PlanSpec (saved to `artifacts/plans/router_plan.txt`)
-  - `refine_step(summary)`: adjust guidance using tests/gates
-  - `huddle(topic, questions, proposed_contract)`: return 1–3 DecisionSummary JSON objects
-- Agents:
-  - BackendAgent: proposes OpenAPI and generates FastAPI scaffold
-  - FrontendAgent: produces wireframes and a static FE scaffold
-  - LLMApiAgent: adapter notes, prompt I/O schema, backend adapter stubs
-  - TestAgent: contract tests (schema/http/unit), smoke assertions
-- Contracts & Stage Gates:
-  - ContractRunner executes JSON test specs, saves results
-  - GateEvaluator resolves boolean conditions (tests.pass, artifact.exists) with traces
-- Artifacts & RAG:
-  - ArtifactStore saves text files and maintains `artifacts/index.json`
-  - RagIndex provides TF‑IDF search over per‑run artifacts and selected repo files
-- Logging:
-  - RunLogger appends structured JSON lines to `run.jsonl` with secrets redacted
+- lattice scrub [<run_id>]
+  - Redacts secrets from `config.json` and `run.jsonl` for the run or for all runs.
 
-Huddles
 
-- Modes: `dialog` (agents exchange short rounds, then synthesize) or `synthesis` (single LLM pass)
-- Persistence:
-  - Markdown transcript: `artifacts/huddles/hud_<id>.md` includes Mode, Questions, Transcript, Notes
-  - JSON record: `artifacts/huddles/hud_<id>.json` with `mode` and `auto_decision`
-- Decisions:
-  - DecisionSummaries saved to `artifacts/decisions/ds_*.json`
-  - A compact injection block is added to prompts for subsequent agent turns
+Providers & Environment
 
-Artifacts Layout
+- Default provider order
+  - Router: Groq → LM Studio fallback
+  - Agents: Gemini (OpenAI‑compatible surface) → LM Studio fallback
 
-- `artifacts/index.json` — artifact catalog
-- `artifacts/plans/router_plan.txt` — Router LLM plan
-- `artifacts/plans/snapshot.json` — per‑step gate/test snapshots
-- `artifacts/huddles/hud_*.md|json` — transcripts and records
-- `artifacts/decisions/ds_*.json` — DecisionSummaries
-- `artifacts/contracts/openapi.yaml` — API spec
-- `artifacts/contracts/tests/contract_tests.json` — test specs
-- `artifacts/contracts/results/*.json` — results
-- `artifacts/backend/**` — FastAPI scaffold (app/main.py, requirements.txt, run.sh)
-- `artifacts/frontend/**` — static FE scaffold (app/index.html, app/script.js, app/styles.css, run.sh)
-- `artifacts/run_summary.json` — summary: providers (redacted), orders, gate/test statuses, scaffold roots
+- Credentials
+  - Router: `export GROQ_API_KEY=...`
+  - Agents: `export GEMINI_API_KEY=...`
 
-Logs (run.jsonl)
+- Optional overrides
+  - Force provider: `LATTICE_PROVIDER=groq` (applies to router+agents), or `LATTICE_ROUTER_PROVIDER`, `LATTICE_AGENT_PROVIDER`
+  - Provider order: `LATTICE_ROUTER_PROVIDER_ORDER=groq,lmstudio`, `LATTICE_AGENT_PROVIDER_ORDER=gemini-openai-compat,lmstudio`
+  - Default model (first provider): `LATTICE_ROUTER_MODEL`, `LATTICE_AGENT_MODEL`
+  - Temperature/tokens: `LATTICE_TEMPERATURE`, `LATTICE_MAX_TOKENS`
+  - Huddles mode: `LATTICE_HUDDLES=dialog|synthesis`
+  - Initial mode: `LATTICE_MODE=ladder|tracks|weave`
 
-- `run_start` — config snapshot
-- `model_call` — low‑level provider call (request/response, retries, fallback_chain)
-- `router_llm_turn` — Router LLM call (phase: init|refine|huddle|inject)
-- `agent_model_turn` — sub‑agent LLM call summary
-- `artifact_write` — file persisted into artifacts
-- `rag_ingest` / `rag_ingest_agent` / `rag_search` — RAG activity
-- `contract_test_run` / `contract_test_result` — contract tests
-- `stage_gate_condition` / `stage_gate_trace` / `stage_gate_result` — gate evaluations
-- `huddle_request` / `huddle_open` / `huddle_message` / `huddle_close` / `huddle_complete` — huddle lifecycle
-- `decision_summary` — DecisionSummary saved
-- `run_complete` — pointers to summary
 
-Running the Scaffolds Locally
+Key Concepts
 
-- Backend (FastAPI):
-  ```bash
-  cd runs/<run_id>/artifacts/backend
-  python3 -m venv .venv && . .venv/bin/activate
-  pip install -r requirements.txt
-  ./run.sh  # port 8000 by default
-  ```
-- Frontend (static):
-  ```bash
-  cd runs/<run_id>/artifacts/frontend
-  ./run.sh  # serves ./app via python http.server on $PORT (default 5173)
-  ```
+- Router modes
+  - Ladder: strictly ordered critical path.
+  - Tracks: parallel slices across agents.
+  - Weave (M4): Ladder on the critical path, with a Docs/README track in parallel. A minimal PlanGraph is saved to `artifacts/plans/plan_graph.json` with nodes, edges, segment modes, and `reasons[]` (switch/replan causes).
 
-Module Guide (src/lattice)
+- Huddles → DecisionSummaries
+  - The Router convenes agents. A Router LLM synthesizes 1–3 DecisionSummary JSON objects with topic, options, decision, rationale, risks, actions, contracts, links.
+  - M4 extends DecisionSummary with optional `sources[]` (provenance) capturing `EvidenceRef` (artifact|rag_doc).
 
-- cli.py — CLI entrypoints and UX
-  - Commands: `run`, `logs`, `scrub`
-  - New flags on `run`: `--router-provider`, `--router-model`, `--huddles`
-  - Prints artifact dir, log path, summary, and provider mix
-- router.py — RouterRunner
-  - Orchestrates Ladder/Tracks, calls RouterLLM, huddles, agents, ContractRunner, and GateEvaluator
-  - Saves plan snapshots and run_summary.json
-- router_llm.py — RouterLLM
-  - Role‑scoped provider order and model overrides
-  - Emits `router_llm_turn` events
-- agents.py — Agents and base contract
-  - BaseAgent utilities (model calling, artifact writing, RAG)
-  - FrontendAgent, BackendAgent, LLMApiAgent, TestAgent
-- contracts.py — ContractRunner
-  - Runs schema/http/unit tests from JSON and saves results
-- stage_gates.py — Gate system
-  - StageGate dataclass and GateEvaluator with boolean expression parsing
-- huddle.py — Huddles and decisions
-  - DecisionSummary/HuddleRecord, parsing, saving transcripts and JSON records
-  - Adds `mode` and `auto_decision`; records dialog transcripts
-- config.py — Provider and run configuration
-  - Router vs Agent provider orders, defaults, and model pins
-  - Gemini provider via OpenAI‑compat endpoint (`gemini-openai-compat`)
-- providers.py — OpenAI‑compat provider and fallback orchestration
-  - Adds per‑provider `model_overrides` and logs `fallback_chain`
-- artifacts.py — ArtifactStore for text outputs with catalog
-- rag.py — Per‑run TF‑IDF index with search
-- runlog.py — JSONL logger with secret redaction
-- transcript.py — Human‑readable run transcript builder
-- ids.py — ULID generator
-- secrets.py — Recursive secret redaction
-- worker.py — Worker runner (used only for repo RAG pre‑ingest helper)
-- __main__.py — Module entry to CLI
-- __init__.py — Package export/version
+- Stage Gates & Contract Tests
+  - Gates are boolean expressions such as `tests.pass('api_contract') and artifact.exists('backend/**')`.
+  - Evaluations log `gate_eval` with `checked_conditions[]` and `evidence[]` (artifact/RAG provenance supporting pass/fail).
+  - Contract tests are stored under `artifacts/contracts/tests/*.json`; results under `artifacts/contracts/results/*.json`.
 
-Notes
+- Knowledge Signal (no network)
+  - Simulate “new info arrived” with a local drop‑in file under `artifacts/knowledge/*.json`:
+    `{ "source":"artifact|rag_doc", "refs": [ { "type":"artifact", "id":"artifacts/...", "hash":"sha256:..." } ] }`
+  - The Router ingests these, logs `knowledge_signal`, opens a huddle, and replans. In M4, such references may be attached to downstream DecisionSummaries’ `sources[]`.
 
-- RAG pre‑ingest runs during setup to index select repo files.
-- Providers in summaries are redacted for safety; full details are in `run.jsonl`.
+- Finalization Pass
+  - Emits `artifacts/finalization/report.json` with:
+    - `linters`: placeholder entries (M4 no linters configured)
+    - `tests`: parsed contract test results
+    - `drift`: `contract_drift|spec_drift|evidence_drift` (compares current artifact hashes vs earlier EvidenceRef hashes)
+    - `deliverables`: `artifacts/deliverables/deliverables.zip`
+    - `decision_log_path`: `artifacts/decisions/decision_log.md`
+    - `citation_index_path`: `artifacts/citations/index.json` (maps `ds_id → EvidenceRef[]`)
+
+
+Example Workflow
+
+1) Run Weave for a CLI app with docs in parallel
+   - `lattice run "ship a small CLI + README"`
+   - If your goal mentions “readme”/“docs” the Router will prefer Weave. Critical path: contracts → backend scaffold → smoke tests. Docs track drafts a README in parallel.
+
+2) Simulate a knowledge update (optional)
+   - Write a drop‑in under `runs/<run_id>/artifacts/knowledge/new_info.json` with `source` and `refs[]`.
+   - Router logs `knowledge_signal`, opens a huddle, and replans (may remain in Weave or switch).
+
+3) Inspect outputs
+   - Scaffolds: `artifacts/backend/*`, `artifacts/frontend/*`
+   - Contracts & tests: `artifacts/contracts/*`
+   - Huddles & decisions: `artifacts/huddles/*`, `artifacts/decisions/*`
+   - PlanGraph & snapshots: `artifacts/plans/*`
+   - Knowledge journal: `artifacts/knowledge/*`
+   - Finalization: `artifacts/finalization/report.json`, `artifacts/decisions/decision_log.md`, `artifacts/citations/index.json`, and `artifacts/deliverables/deliverables.zip`
+
+4) Logs & scrubbing
+   - `lattice logs <run_id> --output-only`
+   - `lattice scrub <run_id>` or `lattice scrub` (all runs)
+
+
+Provenance & Citations (M4 plumbing)
+
+- EvidenceRef union:
+  - Artifact: `{ "type":"artifact", "id":"artifacts/...", "hash":"sha256:..." }`
+  - RAG doc: `{ "type":"rag_doc", "id":"doc-id", "score":0.42, "hash?":"..." }`
+  - External (reserved for M5)
+- Finalization emits a Decision Log with inline citations and a machine‑readable Citation Index.
+
+
+Troubleshooting
+
+- Router/agent model calls require providers. If you don’t have API keys or a local LM Studio server, `run` may fail. You can still use `logs` and `scrub` on existing runs.
+- If you see timeouts from your primary provider, LATTICE falls back per configured order.
+
+
+Development Map (selected files)
+
+- `src/lattice/router.py` — RouterRunner (modes, huddles, knowledge signals, finalization)
+- `src/lattice/agents.py` — Frontend/Backend/LLM/Test agents
+- `src/lattice/stage_gates.py` — Stage gates + evaluator with provenance
+- `src/lattice/huddle.py` — DecisionSummary model (with `sources[]`) + parser/saver
+- `src/lattice/plan.py` — PlanGraph (nodes/edges/modes/reasons)
+- `src/lattice/knowledge.py` — KnowledgeBus (drop‑in ingestion + logging)
+- `src/lattice/provenance.py` — EvidenceRef types + helpers
+- `src/lattice/finalize.py` — Finalization pass (drift, decision log, citations, zip)
+- `src/lattice/cli.py` — CLI entry (run/logs/scrub)
+

@@ -3,7 +3,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Any, Dict, List, Optional
 
 from .artifacts import ArtifactStore
@@ -16,7 +16,9 @@ class StageGate:
     name: str
     conditions: List[str]
     owner: str = "router"
-    status: str = "pending"  # pending|passed|failed
+    status: str = "pending"  
+    checked_conditions: List[Dict[str, Any]] = field(default_factory=list)
+    evidence: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
@@ -27,7 +29,7 @@ class GateEvaluator:
         self.run_dir = run_dir
         self.artifacts = artifacts
         self.logger = logger
-        self.latest_tests: Dict[str, str] = {}  # id -> status
+        self.latest_tests: Dict[str, str] = {}  
 
     def load_test_results(self) -> None:
         base = os.path.join(self.run_dir, "artifacts", "contracts", "results")
@@ -172,6 +174,8 @@ class GateEvaluator:
         out: List[StageGate] = []
         for g in gates:
             overall = True
+            g.checked_conditions = []
+            g.evidence = []
             for cond in g.conditions:
                 tokens = self._tokenize(cond)
                 ok = self._parse_eval(tokens)
@@ -180,10 +184,26 @@ class GateEvaluator:
                     val = self._eval_atom(t)
                     if val is not None:
                         atoms.append({"expr": t, "value": bool(val)})
+                        if t.startswith("tests.pass("):
+                            test_id = t[len("tests.pass("):-1].strip("\"' ")
+                            rel = os.path.join("artifacts", "contracts", "results", f"{test_id}.json")
+                            if os.path.exists(os.path.join(self.run_dir, rel)):
+                                try:
+                                    with open(os.path.join(self.run_dir, rel), "rb") as f:
+                                        import hashlib
+                                        h = hashlib.sha256(f.read()).hexdigest()
+                                    g.evidence.append({"type": "artifact", "id": rel, "hash": f"sha256:{h}"})
+                                except Exception:
+                                    g.evidence.append({"type": "artifact", "id": rel})
+                        if t.startswith("artifact.exists("):
+                            pat = t[len("artifact.exists("):-1].strip("\"' ")
+                            g.evidence.append({"type": "artifact", "id": pat})
                 self.logger.log("stage_gate_condition", gate_id=g.id, condition=cond, ok=ok)
                 self.logger.log("stage_gate_trace", gate_id=g.id, condition=cond, atoms=atoms, result=ok)
+                g.checked_conditions.append({"condition": cond, "atoms": atoms, "result": ok})
                 overall = overall and ok
             g.status = "passed" if overall else "failed"
             self.logger.log("stage_gate_result", gate_id=g.id, name=g.name, status=g.status)
+            self.logger.log("gate_eval", id=g.id, status=g.status, checked_conditions=g.checked_conditions, evidence=g.evidence)
             out.append(g)
         return out

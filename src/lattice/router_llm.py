@@ -110,4 +110,3 @@ class RouterLLM:
         )
         messages = [{"role": "system", "content": sys}, {"role": "user", "content": decision_summaries_text[:4000]}]
         return self._call(messages, phase="inject")
-

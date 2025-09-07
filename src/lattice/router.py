@@ -27,6 +27,10 @@ from .stage_gates import GateEvaluator, StageGate
 from .transcript import RunningTranscript
 from .worker import gen_run_id
 from .router_llm import RouterLLM
+from .plan import PlanGraph, PlanNode
+from .knowledge import KnowledgeBus
+from .provenance import evidence_from_artifact_path
+from .finalize import run_finalization
 
 
 class RouterRunner:
@@ -39,8 +43,11 @@ class RouterRunner:
         self.artifacts = ArtifactStore(self.run_dir)
         self.rag = RagIndex(self.run_dir)
         self.cfg: Optional[RunConfig] = None
-        self.mode = (mode or os.environ.get("LATTICE_MODE") or random.choice(["ladder", "tracks"]).lower()).strip()
-        if self.mode not in ("ladder", "tracks"):
+        default_mode = "weave" if (os.environ.get("LATTICE_MODE") is None) else os.environ.get("LATTICE_MODE")
+        if not mode and not default_mode:
+            default_mode = random.choice(["ladder", "tracks", "weave"])  
+        self.mode = (mode or default_mode or "ladder").strip().lower()
+        if self.mode not in ("ladder", "tracks", "weave"):
             self.mode = "ladder"
 
         self._decisions: List[DecisionSummary] = []
@@ -123,7 +130,7 @@ class RouterRunner:
                 return datetime.now(timezone.utc).isoformat()
             def _summarize_transcript(msgs: List[Dict[str, str]], max_chars: int = 5500) -> str:
                 blocks: List[str] = []
-                for m in msgs[-20:]:  # last 20 messages
+                for m in msgs[-20:]:  
                     who = m.get('from', '?')
                     content = str(m.get('content', '')).strip()
                     blocks.append(f"{who}:\n{content}")
@@ -276,6 +283,13 @@ class RouterRunner:
         self.logger.log("run_start", run_id=self.run_id, run_dir=self.run_dir, mode=self.mode, config=cfg_public)
 
         try:
+            if isinstance(goal, str) and ("readme" in goal.lower() or "docs" in goal.lower()) and self.mode in ("ladder", "tracks"):
+                self.logger.log("plan_switch", from_mode=self.mode, to_mode="weave", reason_type="scope_change", details="goal mentions README/docs", decisions=[])
+                self.mode = "weave"
+        except Exception:
+            pass
+
+        try:
             from .worker import WorkerRunner
 
             wr = WorkerRunner(self.cwd, self.run_id)
@@ -284,6 +298,7 @@ class RouterRunner:
             pass
 
         transcript = RunningTranscript(self.run_id)
+        kbus = KnowledgeBus(self.run_dir, self.logger)
 
         rllm = RouterLLM(self.cfg, self.logger)
         fe = FrontendAgent("frontend", self.cfg, self.logger, self.artifacts, self.rag)
@@ -293,6 +308,11 @@ class RouterRunner:
         agents = {"frontend": fe, "backend": be, "llmapi": llm, "tests": tst}
 
         decisions: List[DecisionSummary] = []
+        plan_graph = PlanGraph()
+        if self.mode == "weave":
+            plan_graph.mode_by_segment = {"critical": "ladder", "docs": "tracks"}
+        else:
+            plan_graph.mode_by_segment = {"main": self.mode}
         runner = ContractRunner(self.run_dir, self.logger)
         gates: List[StageGate] = [
             StageGate(
@@ -441,7 +461,7 @@ class RouterRunner:
                 }
             )
 
-        else:  # tracks
+        elif self.mode == "tracks":  
             slice_active = [fe, be, llm, tst]
             plans = [a.plan("tracks", {"goal": goal, "decisions": decisions}) for a in slice_active]
             self.logger.log("router_plans", mode=self.mode, step="slice-1", plans=[asdict(p) for p in plans])
@@ -469,13 +489,148 @@ class RouterRunner:
                     "tests": [asdict(r) for r in results],
                 }
             )
+        else:  
+            plan_graph.add_node(PlanNode(id="n_contracts", name="API contracts", modeSegment="critical"))
+            plan_graph.add_node(PlanNode(id="n_backend", name="Backend scaffold", modeSegment="critical"))
+            plan_graph.add_node(PlanNode(id="n_smoke", name="Smoke tests", modeSegment="critical"))
+            plan_graph.add_edge("n_contracts", "n_backend")
+            plan_graph.add_edge("n_backend", "n_smoke")
+
+            plan_graph.add_node(PlanNode(id="n_docs", name="Docs/README", modeSegment="docs"))
+
+            active_crit = [be, llm, tst]
+            plans = [a.plan("contracts", {"goal": goal, "decisions": decisions}) for a in active_crit]
+            self.logger.log("router_plans", mode=self.mode, step="contracts", plans=[asdict(p) for p in plans])
+            for a in active_crit:
+                refs = a.act({"goal": goal, "decisions": decisions})
+                self.logger.log("agent_turn", agent=a.name, artifacts=[r.path for r in refs])
+            try:
+                doc_out = llm._model([
+                    {"role": "system", "content": "You are the Docs agent. Write a concise README for the generated CLI app."},
+                    {"role": "user", "content": f"Goal: {goal}\n\nWrite a minimal README with: Overview, Quickstart, Commands, and Notes."},
+                ])
+                readme_art = self.artifacts.add_text("README.md", doc_out, tags=["docs", "readme"], meta={"segment": "docs"})
+                plan_graph.nodes[-1].evidence.append({"type": "artifact", "id": readme_art.path, "hash": f"sha256:{readme_art.sha256}"})
+                self.logger.log("agent_turn", agent="docs", artifacts=[readme_art.path])
+            except Exception:
+                pass
+
+            results = runner.scan_and_run()
+            if any(a.needs_huddle({"goal": goal, "decisions": decisions}) for a in active_crit):
+                hud = self._execute_huddle(
+                    topic=self._huddle_topic(goal),
+                    questions=["Resource fields?", "Endpoints & DTOs?", "Error model?"],
+                    proposed_contract=None,
+                    transcript=transcript,
+                    agents=agents,
+                    decisions_so_far=decisions,
+                )
+                decisions = hud.get("decisions", [])
+                transcript.add_decision_injection(decision_injection_text(decisions))
+            gate_results = evaluator.evaluate([g for g in gates if g.id == 'sg_api_contract'])
+
+            try:
+                sim_rel = os.path.join(self.run_dir, "artifacts", "knowledge", "sim_update.json")
+                try:
+                    openapi_rel = os.path.join("artifacts", "contracts", "openapi.yaml")
+                    if os.path.exists(os.path.join(self.run_dir, openapi_rel)) and (not os.path.exists(sim_rel)):
+                        with open(sim_rel, "w", encoding="utf-8") as f:
+                            json.dump({
+                                "source": "artifact",
+                                "refs": [{"type": "artifact", "id": openapi_rel, "hash": f"sha256:{__import__('hashlib').sha256(open(os.path.join(self.run_dir, openapi_rel),'rb').read()).hexdigest()}"}],
+                            }, f, indent=2)
+                except Exception:
+                    pass
+                new_events = kbus.ingest_local_dropins()
+                if new_events:
+                    plan_graph.add_reason("knowledge_update", f"{len(new_events)} new knowledge signal(s)")
+                    self.logger.log("plan_switch", from_mode=self.mode, to_mode="weave", reason_type="knowledge_update", details=f"{len(new_events)} knowledge events", decisions=[d.id for d in decisions])
+                    hud = self._execute_huddle(
+                        topic="Replan due to knowledge update",
+                        questions=["Do we need to adjust contracts or scaffolds?", "Any new risks from the evidence?"],
+                        proposed_contract=None,
+                        transcript=transcript,
+                        agents=agents,
+                        decisions_so_far=decisions,
+                    )
+                    new_ds = hud.get("decisions", [])
+                    refs = []
+                    try:
+                        for ev in new_events:
+                            refs.extend(ev.refs)
+                    except Exception:
+                        pass
+                    for dsum in new_ds:
+                        if not getattr(dsum, "sources", None):
+                            try:
+                                dsum.sources = refs[:]
+                            except Exception:
+                                pass
+                    decisions = decisions + new_ds
+                    transcript.add_decision_injection(decision_injection_text(decisions))
+            except Exception:
+                pass
+
+            plan_snapshots.append(
+                {
+                    "mode": self.mode,
+                    "step": "contracts/weave_docs",
+                    "gates": [asdict(g) for g in gate_results],
+                    "tests": [asdict(r) for r in results],
+                }
+            )
+
+            active = [be, llm]
+            plans2 = [a.plan("backend_scaffold", {"goal": goal, "decisions": decisions}) for a in active]
+            self.logger.log("router_plans", mode=self.mode, step="backend_scaffold", plans=[asdict(p) for p in plans2])
+            for a in active:
+                refs = a.act({"goal": goal, "decisions": decisions, "phase": "backend_scaffold"})
+                self.logger.log("agent_turn", agent=a.name, artifacts=[r.path for r in refs])
+            results2 = runner.scan_and_run()
+            gate_results2 = evaluator.evaluate([g for g in gates if g.id in ('sg_api_contract','sg_be_scaffold')])
+            plan_snapshots.append(
+                {
+                    "mode": self.mode,
+                    "step": "backend_scaffold",
+                    "gates": [asdict(g) for g in gate_results2],
+                    "tests": [asdict(r) for r in (results + results2)],
+                }
+            )
+
+            active_fe = [fe]
+            plans3 = [a.plan("frontend_scaffold", {"goal": goal, "decisions": decisions}) for a in active_fe]
+            self.logger.log("router_plans", mode=self.mode, step="frontend_scaffold", plans=[asdict(p) for p in plans3])
+            for a in active_fe:
+                refs = a.act({"goal": goal, "decisions": decisions, "phase": "frontend_scaffold"})
+                self.logger.log("agent_turn", agent=a.name, artifacts=[r.path for r in refs])
+            results3 = runner.scan_and_run()
+            gate_results3 = evaluator.evaluate([g for g in gates if g.id in ('sg_fe_scaffold',)])
+
+            results4 = runner.scan_and_run()
+            gate_results4 = evaluator.evaluate([g for g in gates if g.id in ('sg_smoke','sg_fe_scaffold','sg_be_scaffold','sg_api_contract')])
+            plan_snapshots.append(
+                {
+                    "mode": self.mode,
+                    "step": "smoke_tests",
+                    "gates": [asdict(g) for g in gate_results4],
+                    "tests": [asdict(r) for r in (results + results2 + results3 + results4)],
+                }
+            )
 
         try:
-            self.artifacts.add_text(os.path.join("plans", "snapshot.json"), json.dumps(plan_snapshots, indent=2), tags=["plan", "snapshot"])  # type: ignore[arg-type]
+            plan_graph.save(self.run_dir)
         except Exception:
             pass
 
+        try:
+            self.artifacts.add_text(os.path.join("plans", "snapshot.json"), json.dumps(plan_snapshots, indent=2), tags=["plan", "snapshot"])  
+        except Exception:
+            pass
+
+        final_report = run_finalization(self.run_dir, self.artifacts, self.logger, decisions, evaluator)
+
         summary = self._build_summary(agents, evaluator, decisions)
+        summary["finalization_report"] = os.path.join("artifacts", "finalization", "report.json")
         self.artifacts.add_text("run_summary.json", json.dumps(summary, indent=2), tags=["summary"])
         self.logger.log("run_complete", summary_path=os.path.join(self.run_dir, "artifacts", "run_summary.json"))
 

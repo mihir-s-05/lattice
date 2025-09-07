@@ -125,4 +125,3 @@ class RunningTranscript:
             parts.append("")
             parts.append(e.body)
         return "\n".join(parts) + "\n"
-

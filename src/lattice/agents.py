@@ -27,7 +27,7 @@ class ArtifactRef:
 class ContractSpec:
     id: str
     subject: str
-    type: str  # schema|http|unit
+    type: str  
     spec_path: str
     runner: str = "local"
     pass_criteria: Dict[str, Any] = field(default_factory=dict)
@@ -44,7 +44,7 @@ class AgentPlan:
 @dataclass
 class AgentReport:
     agent: str
-    status: str  # ok|blocked|needs_huddle|error
+    status: str  
     progress: str
     risks: List[str] = field(default_factory=list)
     artifacts: List[str] = field(default_factory=list)
@@ -67,7 +67,7 @@ class BaseAgent:
         self._last_artifacts: List[ArtifactRef] = []
         self._last_plan: Optional[AgentPlan] = None
         self._last_report: Optional[AgentReport] = None
-        self._provider_usage: List[Tuple[str, str]] = []  # (provider, model)
+        self._provider_usage: List[Tuple[str, str]] = []  
         self._rag_queries: List[Dict[str, Any]] = []
 
     def plan(self, step_or_goal: str, context: Dict[str, Any]) -> AgentPlan:
@@ -471,7 +471,6 @@ class LLMApiAgent(BaseAgent):
         }
         refs: List[ArtifactRef] = []
         refs.append(self._write_artifact(os.path.join("llm", "adapters.md"), out, tags=["llm", "adapters"]))
-        # Derive schema from output or fallback to domain-specific defaults
         def _extract_json_block(text: str) -> Optional[Dict[str, Any]]:
             try:
                 if "```json" in text:

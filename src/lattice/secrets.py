@@ -24,12 +24,7 @@ def _is_sensitive_key(key: str) -> bool:
 
 
 def redact_secrets(obj: Any) -> Any:
-    """Recursively redact sensitive values in mappings/lists.
-
-    - For dict keys that look sensitive, replace values with "REDACTED".
-    - For lists/tuples, redact each element.
-    - For other types, return as-is.
-    """
+    
     if isinstance(obj, Mapping):
         out: MutableMapping[str, Any] = {}
         for k, v in obj.items():
@@ -41,4 +36,3 @@ def redact_secrets(obj: Any) -> Any:
     if isinstance(obj, Sequence) and not isinstance(obj, (str, bytes, bytearray)):
         return [redact_secrets(x) for x in obj]
     return obj
-
