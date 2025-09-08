@@ -68,6 +68,81 @@ class RouterLLM:
         )
         return {"provider": provider, "model": model, "text": text}
 
+    def _call_with_tools(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        phase: str,
+        tool_choice: Optional[str] = "auto",
+    ) -> Dict[str, Any]:
+        order = self.cfg.router_provider_order
+        model_overrides = {}
+        if self.cfg.router_model_default:
+            if order:
+                model_overrides[order[0]] = self.cfg.router_model_default
+        t0 = time.time()
+        try:
+            provider, base_url, model, raw, attempts = call_with_fallback(
+                providers=self.cfg.providers,
+                order=order,
+                messages=messages,
+                temperature=self.cfg.temperature,
+                max_tokens=self.cfg.max_tokens,
+                logger=self.logger,
+                tools=tools,
+                tool_choice=tool_choice,
+                model_overrides=model_overrides,
+            )
+        except ProviderError as e:
+            self.logger.log(
+                "router_llm_turn",
+                role="router",
+                plan_phase=phase,
+                provider=None,
+                model=None,
+                base_url=None,
+                request_prompt=messages,
+                response_text=None,
+                latency_ms=None,
+                error=str(e),
+                tools=[t.get("function", {}).get("name") for t in tools or []],
+                tool_choice=tool_choice,
+            )
+            raise
+        dt = int((time.time() - t0) * 1000)
+        text = None
+        try:
+            text = raw["choices"][0]["message"].get("content")
+        except Exception:
+            text = None
+        tool_calls = []
+        try:
+            tool_calls = raw["choices"][0]["message"].get("tool_calls") or []
+        except Exception:
+            tool_calls = []
+        self.logger.log(
+            "router_llm_turn",
+            role="router",
+            plan_phase=phase,
+            provider=provider,
+            model=model,
+            base_url=base_url,
+            request_prompt=messages,
+            response_text=text,
+            latency_ms=dt,
+            error=None,
+            tools=[t.get("function", {}).get("name") for t in tools or []],
+            tool_choice=tool_choice,
+            tool_calls=[
+                {
+                    "name": (tc or {}).get("function", {}).get("name"),
+                    "arguments": (tc or {}).get("function", {}).get("arguments"),
+                }
+                for tc in tool_calls
+            ],
+        )
+        return {"provider": provider, "model": model, "text": text, "raw": raw}
+
     def plan_init(self, goal: str, context_text: Optional[str] = None) -> Dict[str, Any]:
         sys = (
             "You are the Router LLM for a multi-agent system."

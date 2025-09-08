@@ -60,7 +60,15 @@ class ArtifactStore:
             meta=meta,
         )
         idx = self._load_index()
-        idx["artifacts"].append(asdict(artifact))
+        arts = idx.get("artifacts", [])
+        new_list: List[Dict[str, Any]] = []
+        for a in arts:
+            if isinstance(a, dict):
+                if a.get("path") != rel_path:
+                    new_list.append(a)
+        arts = new_list
+        arts.append(asdict(artifact))
+        idx["artifacts"] = arts
         self._save_index(idx)
         return artifact
 

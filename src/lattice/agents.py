@@ -12,6 +12,7 @@ from .providers import call_with_fallback, ProviderError
 from .rag import RagIndex
 from .runlog import RunLogger
 from .huddle import decision_injection_text
+from .template_loader import get_frontend_templates, get_backend_templates, get_cli_templates
 
 
 @dataclass
@@ -27,7 +28,7 @@ class ArtifactRef:
 class ContractSpec:
     id: str
     subject: str
-    type: str  
+    type: str
     spec_path: str
     runner: str = "local"
     pass_criteria: Dict[str, Any] = field(default_factory=dict)
@@ -44,7 +45,7 @@ class AgentPlan:
 @dataclass
 class AgentReport:
     agent: str
-    status: str  
+    status: str
     progress: str
     risks: List[str] = field(default_factory=list)
     artifacts: List[str] = field(default_factory=list)
@@ -67,7 +68,7 @@ class BaseAgent:
         self._last_artifacts: List[ArtifactRef] = []
         self._last_plan: Optional[AgentPlan] = None
         self._last_report: Optional[AgentReport] = None
-        self._provider_usage: List[Tuple[str, str]] = []  
+        self._provider_usage: List[Tuple[str, str]] = []
         self._rag_queries: List[Dict[str, Any]] = []
 
     def plan(self, step_or_goal: str, context: Dict[str, Any]) -> AgentPlan:
@@ -175,86 +176,15 @@ class FrontendAgent(BaseAgent):
         refs: List[ArtifactRef] = []
         refs.append(self._write_artifact(os.path.join("fe", "wireframes.md"), wire, tags=["fe", "wireframes"]))
         refs.append(self._write_artifact(os.path.join("fe", "ui_schema.json"), schema, tags=["fe", "schema"]))
-        index_html = """<!doctype html>
-<html>
-  <head>
-    <meta charset=\"utf-8\" />
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-    <title>Notes App</title>
-    <link rel=\"stylesheet\" href=\"styles.css\" />
-  </head>
-  <body>
-    <header><h1>Notes</h1><button id=\"newBtn\">+</button></header>
-    <main>
-      <ul id=\"list\"></ul>
-      <section id=\"detail\" hidden>
-        <input id=\"title\" placeholder=\"Title\" />
-        <textarea id=\"content\" placeholder=\"Content\"></textarea>
-        <button id=\"saveBtn\">Save</button>
-      </section>
-    </main>
-    <script src=\"script.js\"></script>
-  </body>
-  </html>
-"""
-        script_js = """const list = document.getElementById('list');
-const detail = document.getElementById('detail');
-const titleEl = document.getElementById('title');
-const contentEl = document.getElementById('content');
-const saveBtn = document.getElementById('saveBtn');
-const newBtn = document.getElementById('newBtn');
-
-let notes = [];
-function render(){
-  list.innerHTML = notes.map(n => `<li data-id="${n.id}"><strong>${n.title}</strong> – ${n.content.slice(0,40)}</li>`).join('');
-}
-newBtn.onclick = () => { detail.hidden = false; titleEl.value=''; contentEl.value=''; };
-saveBtn.onclick = () => {
-  const n = { id: String(Date.now()), title: titleEl.value, content: contentEl.value };
-  notes.unshift(n); detail.hidden = true; render();
-};
-list.onclick = (e) => {
-  const li = e.target.closest('li'); if(!li) return; const n = notes.find(x=>x.id===li.dataset.id);
-  alert((n && n.content) || 'not found');
-};
-render();
-"""
-        styles_css = """body{font-family:system-ui;margin:0} header{display:flex;align-items:center;gap:8px;padding:12px;border-bottom:1px solid #ddd} #newBtn{margin-left:auto} main{display:flex;gap:16px;padding:12px} ul{list-style:none;padding:0;margin:0;width:50%} li{padding:8px;border-bottom:1px solid #eee;cursor:pointer} #detail{display:flex;flex-direction:column;gap:8px;width:50%} textarea{min-height:200px}
-"""
-        run_sh = """#!/usr/bin/env sh
-set -eu
-PORT=${PORT:-5173}
-cd "$(dirname "$0")"/app
-python3 -m http.server "$PORT"
-"""
+        
         app_title = (goal or "App").strip().title() or "App"
-        index_html = f"""<!doctype html>
-<html>
-  <head>
-    <meta charset=\"utf-8\" />
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-    <title>{app_title}</title>
-    <link rel=\"stylesheet\" href=\"styles.css\" />
-  </head>
-  <body>
-    <header><h1>{app_title}</h1></header>
-    <main>
-      <section>
-        <p>This is a minimal front-end scaffold. Wire it to your API and components defined in ui_schema.json.</p>
-      </section>
-    </main>
-    <script src=\"script.js\"></script>
-  </body>
-  </html>
-"""
-        script_js = """console.log('Frontend scaffold ready');
-"""
-        styles_css = """body{font-family:system-ui;margin:0} header{display:flex;align-items:center;gap:8px;padding:12px;border-bottom:1px solid #ddd} main{padding:12px}
-"""
-        refs.append(self._write_artifact(os.path.join("frontend", "app", "index.html"), index_html, tags=["frontend", "scaffold"]))
-        refs.append(self._write_artifact(os.path.join("frontend", "app", "script.js"), script_js, tags=["frontend", "scaffold"]))
-        refs.append(self._write_artifact(os.path.join("frontend", "app", "styles.css"), styles_css, tags=["frontend", "scaffold"]))
-        refs.append(self._write_artifact(os.path.join("frontend", "run.sh"), run_sh, tags=["frontend", "scaffold"]))
+        template_context = {"app_title": app_title}
+        templates = get_frontend_templates(template_context)
+
+        refs.append(self._write_artifact(os.path.join("frontend", "app", "index.html"), templates.get("index.html", ""), tags=["frontend", "scaffold"]))
+        refs.append(self._write_artifact(os.path.join("frontend", "app", "script.js"), templates.get("script.js", ""), tags=["frontend", "scaffold"]))
+        refs.append(self._write_artifact(os.path.join("frontend", "app", "styles.css"), templates.get("styles.css", ""), tags=["frontend", "scaffold"]))
+        refs.append(self._write_artifact(os.path.join("frontend", "run.sh"), templates.get("run.sh", ""), tags=["frontend", "scaffold"]))
         self._last_report = AgentReport(
             agent=self.name,
             status="ok",
@@ -307,124 +237,17 @@ class BackendAgent(BaseAgent):
         refs: List[ArtifactRef] = []
         refs.append(self._write_artifact(os.path.join("contracts", "openapi.yaml"), yaml_text, tags=["contract", "openapi"]))
         refs.append(self._write_artifact(os.path.join("backend", "README.md"), out, tags=["backend"]))
-        main_py = """from fastapi import FastAPI
-from pydantic import BaseModel
-from typing import List
 
-app = FastAPI()
+        backend_templates = get_backend_templates()
+        refs.append(self._write_artifact(os.path.join("backend", "app", "main.py"), backend_templates.get("main.py", ""), tags=["backend", "scaffold"]))
+        refs.append(self._write_artifact(os.path.join("backend", "requirements.txt"), backend_templates.get("requirements.txt", ""), tags=["backend", "scaffold"]))
+        refs.append(self._write_artifact(os.path.join("backend", "run.sh"), backend_templates.get("run.sh", ""), tags=["backend", "scaffold"]))
 
-class Note(BaseModel):
-    id: str
-    title: str
-    content: str
-    createdAt: str
-    updatedAt: str
+        cli_templates = get_cli_templates()
+        refs.append(self._write_artifact(os.path.join("cli", "main.py"), cli_templates.get("main.py", ""), tags=["cli", "scaffold"]))
 
-class NoteInput(BaseModel):
-    title: str
-    content: str
-
-_NOTES: List[Note] = []
-
-@app.get('/health')
-def health():
-    return { 'ok': True }
-
-@app.get('/notes', response_model=List[Note])
-def list_notes():
-    return _NOTES
-
-@app.post('/notes', response_model=Note, status_code=201)
-def create_note(inp: NoteInput):
-    from datetime import datetime
-    now = datetime.utcnow().isoformat()+'Z'
-    n = Note(id=str(len(_NOTES)+1), title=inp.title, content=inp.content, createdAt=now, updatedAt=now)
-    _NOTES.append(n)
-    return n
-
-@app.get('/notes/{id}', response_model=Note)
-def get_note(id: str):
-    for n in _NOTES:
-        if n.id == id:
-            return n
-    return Note(id='0', title='not found', content='', createdAt='', updatedAt='')
-
-@app.put('/notes/{id}', response_model=Note)
-def update_note(id: str, inp: NoteInput):
-    from datetime import datetime
-    for i, n in enumerate(_NOTES):
-        if n.id == id:
-            upd = n.copy(update={'title': inp.title, 'content': inp.content, 'updatedAt': datetime.utcnow().isoformat()+'Z'})
-            _NOTES[i] = upd
-            return upd
-    return get_note(id)
-
-@app.delete('/notes/{id}', status_code=204)
-def delete_note(id: str):
-    global _NOTES
-    _NOTES = [n for n in _NOTES if n.id != id]
-    return None
-"""
-        reqs_txt = "fastapi\nuvicorn\n"
-        run_sh = """#!/usr/bin/env sh
-set -eu
-cd "$(dirname "$0")"/app
-exec python3 -m uvicorn main:app --host 0.0.0.0 --port "${PORT:-8000}"
-"""
-        try:
-            import re as _re
-            def _extract_paths(yaml_src: str) -> Dict[str, List[str]]:
-                paths: Dict[str, List[str]] = {}
-                in_paths = False
-                current = None
-                for line in yaml_src.splitlines():
-                    if not in_paths:
-                        if line.strip().startswith("paths:"):
-                            in_paths = True
-                        continue
-                    if _re.match(r"^\s{2}/", line):
-                        current = line.strip().split(":",1)[0]
-                        paths[current] = []
-                        continue
-                    m = _re.match(r"^\s{4}(get|post|put|delete|patch|options|head):", line)
-                    if m and current:
-                        paths[current].append(m.group(1).lower())
-                    if in_paths and line and not line.startswith(" ") and not line.strip().startswith("#"):
-                        break
-                return paths
-            def _params(path: str) -> List[str]:
-                return _re.findall(r"{([^}]+)}", path)
-            def _fn(method: str, path: str) -> str:
-                safe = path.strip('/').replace('/','_').replace('{','').replace('}','') or 'root'
-                return f"{method}_{safe}"
-            _paths = _extract_paths(yaml_text)
-            if not _paths:
-                _paths = {"/echo": ["get"]}
-            blocks: List[str] = []
-            for p, methods in _paths.items():
-                if not methods:
-                    methods = ["get"]
-                params = _params(p)
-                for mth in methods:
-                    blocks.append(f"@app.{mth}('{p}')")
-                    sig = ", ".join([f"{n}: str" for n in params])
-                    if sig: sig = ", " + sig
-                    blocks.append(f"def {_fn(mth,p)}(request: dict = None{sig}):")
-                    blocks.append(f"    return {{'path': '{p}', 'method': '{mth}', 'params': {{{', '.join([f'\"{n}\": {n}' for n in params])}}}}}")
-                    blocks.append("")
-            main_py = (
-                "from fastapi import FastAPI\n\n"
-                "app = FastAPI()\n\n"
-                "@app.get('/health')\n"
-                "def health():\n"
-                "    return {'ok': True}\n\n"
-                + "\n".join(blocks)
-            )
-        except Exception:
-            pass
-        refs.append(self._write_artifact(os.path.join("backend", "app", "main.py"), main_py, tags=["backend", "scaffold"]))
-        refs.append(self._write_artifact(os.path.join("backend", "requirements.txt"), reqs_txt, tags=["backend", "scaffold"]))
-        refs.append(self._write_artifact(os.path.join("backend", "run.sh"), run_sh, tags=["backend", "scaffold"]))
+        readme_md = f"""# Small CLI + README\n\nGoal: {goal}\n\n## Overview\nA minimal CLI (`artifacts/cli/main.py`) and backend scaffold (FastAPI).\n\n## Quickstart\n- Python 3.9+\n- Optional: `pip install -r artifacts/backend/requirements.txt`\n\nRun the CLI:\n```bash\npython artifacts/cli/main.py list\npython artifacts/cli/main.py create --name example --description demo\n```\n\nRun the backend locally:\n```bash\nsh artifacts/backend/run.sh\n```\n\n## Commands\n- `list`\n- `create --name NAME [--description TEXT]`\n- `get ID`\n- `update ID [--name NAME] [--description TEXT]`\n- `delete ID`\n\n## Notes\n- The CLI stubs simulate IO; integrate with the API as needed.\n"""
+        refs.append(self._write_artifact("README.md", readme_md, tags=["docs", "readme"]))
         self._last_report = AgentReport(
             agent=self.name,
             status="ok",

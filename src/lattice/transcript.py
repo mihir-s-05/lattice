@@ -4,13 +4,14 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from .constants import DEFAULT_MESSAGE_MAX_LENGTH, DEFAULT_CONTENT_MAX_LENGTH
 
 
 def _ts() -> str:
     return datetime.utcnow().isoformat() + "Z"
 
 
-def _fmt_messages(messages: List[Dict[str, Any]], max_len: int = 800) -> str:
+def _fmt_messages(messages: List[Dict[str, Any]], max_len: int = DEFAULT_MESSAGE_MAX_LENGTH) -> str:
     parts: List[str] = []
     for m in messages or []:
         role = m.get("role", "?")
@@ -27,7 +28,7 @@ def _fmt_messages(messages: List[Dict[str, Any]], max_len: int = 800) -> str:
     return "\n".join(parts)
 
 
-def _fmt_str(s: Optional[str], max_len: int = 1200) -> str:
+def _fmt_str(s: Optional[str], max_len: int = DEFAULT_CONTENT_MAX_LENGTH) -> str:
     if not s:
         return ""
     s = str(s)

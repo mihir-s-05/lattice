@@ -20,9 +20,9 @@ class PlanNode:
 @dataclass
 class PlanGraph:
     nodes: List[PlanNode] = field(default_factory=list)
-    edges: List[List[str]] = field(default_factory=list)  
-    mode_by_segment: Dict[str, str] = field(default_factory=dict)  
-    reasons: List[Dict[str, Any]] = field(default_factory=list)  
+    edges: List[List[str]] = field(default_factory=list)
+    mode_by_segment: Dict[str, str] = field(default_factory=dict)
+    reasons: List[Dict[str, Any]] = field(default_factory=list)
 
     def add_node(self, node: PlanNode) -> None:
         self.nodes.append(node)

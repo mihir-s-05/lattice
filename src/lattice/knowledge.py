@@ -13,7 +13,7 @@ from .provenance import EvidenceRef
 @dataclass
 class KnowledgeEvent:
     ts: str
-    source: str  
+    source: str
     refs: List[Dict[str, Any]]
 
 

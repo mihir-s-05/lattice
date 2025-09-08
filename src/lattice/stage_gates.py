@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from .artifacts import ArtifactStore
 from .runlog import RunLogger
+from .constants import DEFAULT_RESULTS_DIR
 
 
 @dataclass
@@ -16,7 +17,7 @@ class StageGate:
     name: str
     conditions: List[str]
     owner: str = "router"
-    status: str = "pending"  
+    status: str = "pending"
     checked_conditions: List[Dict[str, Any]] = field(default_factory=list)
     evidence: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -29,10 +30,10 @@ class GateEvaluator:
         self.run_dir = run_dir
         self.artifacts = artifacts
         self.logger = logger
-        self.latest_tests: Dict[str, str] = {}  
+        self.latest_tests: Dict[str, str] = {}
 
     def load_test_results(self) -> None:
-        base = os.path.join(self.run_dir, "artifacts", "contracts", "results")
+        base = os.path.join(self.run_dir, DEFAULT_RESULTS_DIR)
         if not os.path.isdir(base):
             return
         for name in os.listdir(base):
@@ -186,7 +187,7 @@ class GateEvaluator:
                         atoms.append({"expr": t, "value": bool(val)})
                         if t.startswith("tests.pass("):
                             test_id = t[len("tests.pass("):-1].strip("\"' ")
-                            rel = os.path.join("artifacts", "contracts", "results", f"{test_id}.json")
+                            rel = os.path.join(DEFAULT_RESULTS_DIR, f"{test_id}.json")
                             if os.path.exists(os.path.join(self.run_dir, rel)):
                                 try:
                                     with open(os.path.join(self.run_dir, rel), "rb") as f:

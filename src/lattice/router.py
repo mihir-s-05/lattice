@@ -45,13 +45,18 @@ class RouterRunner:
         self.cfg: Optional[RunConfig] = None
         default_mode = "weave" if (os.environ.get("LATTICE_MODE") is None) else os.environ.get("LATTICE_MODE")
         if not mode and not default_mode:
-            default_mode = random.choice(["ladder", "tracks", "weave"])  
+            default_mode = random.choice(["ladder", "tracks", "weave"])
         self.mode = (mode or default_mode or "ladder").strip().lower()
         if self.mode not in ("ladder", "tracks", "weave"):
             self.mode = "ladder"
 
         self._decisions: List[DecisionSummary] = []
         self._provider_usage: Dict[str, int] = {}
+        self._max_slice_agents: int = 3
+        self._max_open_huddles: int = 2
+        self._cooldown_threshold: int = 2
+        self._cooldown_seconds: float = 5.0
+        self._gate_failures: Dict[str, Tuple[int, float]] = {}
 
     def _huddle_topic(self, goal: str) -> str:
         g = (goal or "").strip()
@@ -130,7 +135,7 @@ class RouterRunner:
                 return datetime.now(timezone.utc).isoformat()
             def _summarize_transcript(msgs: List[Dict[str, str]], max_chars: int = 5500) -> str:
                 blocks: List[str] = []
-                for m in msgs[-20:]:  
+                for m in msgs[-20:]:
                     who = m.get('from', '?')
                     content = str(m.get('content', '')).strip()
                     blocks.append(f"{who}:\n{content}")
@@ -281,6 +286,12 @@ class RouterRunner:
         with open(os.path.join(self.run_dir, "config.json"), "w", encoding="utf-8") as f:
             f.write(json.dumps(cfg_public, indent=2))
         self.logger.log("run_start", run_id=self.run_id, run_dir=self.run_dir, mode=self.mode, config=cfg_public)
+
+        try:
+            if getattr(self.cfg, "router_policy", "llm") == "llm":
+                return self._run_agentic(goal)
+        except Exception:
+            pass
 
         try:
             if isinstance(goal, str) and ("readme" in goal.lower() or "docs" in goal.lower()) and self.mode in ("ladder", "tracks"):
@@ -461,7 +472,7 @@ class RouterRunner:
                 }
             )
 
-        elif self.mode == "tracks":  
+        elif self.mode == "tracks":
             slice_active = [fe, be, llm, tst]
             plans = [a.plan("tracks", {"goal": goal, "decisions": decisions}) for a in slice_active]
             self.logger.log("router_plans", mode=self.mode, step="slice-1", plans=[asdict(p) for p in plans])
@@ -489,7 +500,7 @@ class RouterRunner:
                     "tests": [asdict(r) for r in results],
                 }
             )
-        else:  
+        else:
             plan_graph.add_node(PlanNode(id="n_contracts", name="API contracts", modeSegment="critical"))
             plan_graph.add_node(PlanNode(id="n_backend", name="Backend scaffold", modeSegment="critical"))
             plan_graph.add_node(PlanNode(id="n_smoke", name="Smoke tests", modeSegment="critical"))
@@ -623,13 +634,753 @@ class RouterRunner:
             pass
 
         try:
-            self.artifacts.add_text(os.path.join("plans", "snapshot.json"), json.dumps(plan_snapshots, indent=2), tags=["plan", "snapshot"])  
+            self.artifacts.add_text(os.path.join("plans", "snapshot.json"), json.dumps(plan_snapshots, indent=2), tags=["plan", "snapshot"])
         except Exception:
             pass
 
         final_report = run_finalization(self.run_dir, self.artifacts, self.logger, decisions, evaluator)
 
         summary = self._build_summary(agents, evaluator, decisions)
+        summary["finalization_report"] = os.path.join("artifacts", "finalization", "report.json")
+        self.artifacts.add_text("run_summary.json", json.dumps(summary, indent=2), tags=["summary"])
+        self.logger.log("run_complete", summary_path=os.path.join(self.run_dir, "artifacts", "run_summary.json"))
+
+        return {
+            "artifact_dir": os.path.join(self.run_dir, "artifacts"),
+            "log_path": self.logger.path(),
+            "run_id": self.run_id,
+            "summary_path": os.path.join(self.run_dir, "artifacts", "run_summary.json"),
+        }
+
+    def _build_tools_manifest(self) -> List[Dict[str, Any]]:
+        tools: List[Dict[str, Any]] = []
+        def fn(name: str, desc: str, params: Dict[str, Any]) -> Dict[str, Any]:
+            return {"type": "function", "function": {"name": name, "description": desc, "parameters": params}}
+
+        tools.append(fn(
+            "set_mode",
+            "Select Router execution mode (ladder|tracks|weave) with rationale.",
+            {
+                "type": "object",
+                "properties": {
+                    "target_mode": {"type": "string", "enum": ["ladder", "tracks", "weave"]},
+                    "reason": {"type": "string"},
+                },
+                "required": ["target_mode", "reason"],
+            },
+        ))
+        tools.append(fn(
+            "open_huddle",
+            "Open a huddle to align interfaces/contracts and record a transcript start.",
+            {
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string"},
+                    "attendees": {"type": "array", "items": {"type": "string"}},
+                    "agenda": {"type": "string"},
+                },
+                "required": ["topic"],
+            },
+        ))
+        tools.append(fn(
+            "record_decision_summary",
+            "Persist a DecisionSummary JSON and update decision log.",
+            {
+                "type": "object",
+                "properties": {
+                    "huddle_id": {"type": ["string", "null"]},
+                    "topic": {"type": "string"},
+                    "options": {"type": "array", "items": {"type": "string"}},
+                    "decision": {"type": ["string", "null"]},
+                    "rationale": {"type": ["string", "null"]},
+                    "risks": {"type": "array", "items": {"type": "string"}},
+                    "actions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "owner": {"type": "string"},
+                                "task": {"type": "string"},
+                                "due": {"type": ["string", "null"]},
+                            },
+                            "required": ["owner", "task"],
+                        },
+                    },
+                    "contracts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "schema_hash": {"type": "string"},
+                            },
+                            "required": ["name", "schema_hash"],
+                        },
+                    },
+                    "sources": {"type": "array", "items": {"type": "object"}},
+                    "links": {"type": "array", "items": {"type": "object"}},
+                },
+                "required": ["topic", "options"],
+            },
+        ))
+        tools.append(fn(
+            "inject_summary",
+            "Inject a compact DecisionSummary snippet into target contexts (router or agents).",
+            {
+                "type": "object",
+                "properties": {
+                    "decision_id": {"type": "string"},
+                    "targets": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["decision_id", "targets"],
+            },
+        ))
+        tools.append(fn(
+            "spawn_agents",
+            "Create missing agent instances if not already active.",
+            {
+                "type": "object",
+                "properties": {
+                    "roles": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["frontend", "backend", "llmapi", "tests"]},
+                    },
+                    "reason": {"type": "string"},
+                },
+                "required": ["roles", "reason"],
+            },
+        ))
+        tools.append(fn(
+            "schedule_slice",
+            "Run one concurrent slice across selected agents (plan/act/report) and persist outputs.",
+            {
+                "type": "object",
+                "properties": {
+                    "active_agents": {"type": "array", "items": {"type": "string"}},
+                    "notes": {"type": ["string", "null"]},
+                },
+                "required": ["active_agents"],
+            },
+        ))
+        tools.append(fn(
+            "rag_search",
+            "Query the run-scoped vector index for relevant artifacts/transcripts.",
+            {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "top_k": {"type": "integer", "minimum": 1, "maximum": 20},
+                },
+                "required": ["query", "top_k"],
+            },
+        ))
+        if getattr(self.cfg, "web_search_enabled", False):
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "description": "Perform a web search via Groq browser_search or a local adapter.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"},
+                            "top_k": {"type": "integer", "minimum": 1, "maximum": 10},
+                            "time_range": {"type": ["string", "null"], "enum": ["d", "w", "m", "y", None]},
+                            "engines": {"type": ["string", "null"]},
+                        },
+                        "required": ["query", "top_k"],
+                    },
+                },
+            })
+        tools.append(fn(
+            "run_contract_tests",
+            "Run selected contract tests by id and return structured results.",
+            {
+                "type": "object",
+                "properties": {
+                    "tests": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["tests"],
+            },
+        ))
+        tools.append(fn(
+            "propose_advance_step",
+            "Request advancement to the next step; Router enforces stage gates.",
+            {
+                "type": "object",
+                "properties": {
+                    "step_id": {"type": "string"},
+                    "note": {"type": ["string", "null"]},
+                },
+                "required": ["step_id"],
+            },
+        ))
+        tools.append(fn(
+            "write_artifact",
+            "Write an artifact under artifacts/ and index it.",
+            {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                    "mime": {"type": ["string", "null"]},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["path", "content"],
+            },
+        ))
+        tools.append(fn(
+            "read_artifact",
+            "Read an artifact content by path under artifacts/.",
+            {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        ))
+        tools.append(fn(
+            "finalize_run",
+            "Finalize the run: run tests/linters, consolidate citations, create deliverables.",
+            {
+                "type": "object",
+                "properties": {"summary": {"type": "string"}},
+                "required": ["summary"],
+            },
+        ))
+        return tools
+
+    def _router_system_prompt(self) -> str:
+        return (
+            "You are the Router LLM: you decide modes (ladder|tracks|weave), open huddles, write DecisionSummaries, "
+            "spawn/schedule agents, run tests, and finalize. You must act ONLY via tools — do not claim to edit files or advance steps without tools. "
+            "Keep contexts lean: inject only DecisionSummary snippets; use rag_search/web_search for details. "
+            "When decisions depend on artifacts or retrieval, include EvidenceRef sources in record_decision_summary.sources. "
+            "Ask for a huddle when interfaces/ownership are ambiguous. "
+            "NEVER bypass stage gates: request propose_advance_step and accept failures to replan or huddle. "
+            "End by calling finalize_run with a concise run summary and pointers to key artifacts."
+        )
+
+    def _snapshot_state(self, plan_graph: PlanGraph, evaluator: GateEvaluator, decisions: List[DecisionSummary], unread_huddles: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Dict[str, Any]:
+        try:
+            evaluator.load_test_results()
+        except Exception:
+            pass
+        tool_manifest = [ (t.get("function",{}) or {}).get("name") for t in tools ]
+        return {
+            "plan_graph": plan_graph.snapshot(),
+            "mode": self.mode,
+            "latest_tests": evaluator.latest_tests,
+            "active_gates": [
+                {"id": "sg_api_contract", "name": "API contract passes"},
+                {"id": "sg_be_scaffold", "name": "Backend scaffold present"},
+                {"id": "sg_fe_scaffold", "name": "Frontend scaffold present"},
+                {"id": "sg_smoke", "name": "Smoke tests pass"},
+            ],
+            "unread_huddles": unread_huddles,
+            "recent_decisions": [asdict(d) for d in decisions[-5:]],
+            "tools": tool_manifest,
+        }
+
+    def _web_search_exec(self, query: str, top_k: int, time_range: Optional[str], engines: Optional[str]) -> Dict[str, Any]:
+        if not getattr(self.cfg, "web_search_enabled", False):
+            return {"error": "tool_unavailable", "note": "web_search disabled by config"}
+        try:
+            rllm = RouterLLM(self.cfg, self.logger)
+            messages = [
+                {"role": "system", "content": "Use the browser_search tool to gather top results and extract brief summaries. Output concise markdown."},
+                {"role": "user", "content": f"Query: {query}\nTopK: {top_k}\nTimeRange: {time_range or '-'}\nEngines: {engines or '-'}"},
+            ]
+            raw_obj = rllm._call_with_tools(messages, tools=[{"type": "browser_search"}], phase="web_search", tool_choice="required")
+            text = raw_obj.get("text") or ""
+            self.logger.log("web_search", source="groq", query=query, top_k=top_k, note="response_text_captured")
+            return {"results": [], "extracts": [{"url": None, "content_md": text, "status": "ok"}], "note": "source: groq"}
+        except Exception as e:
+            self.logger.log("web_search_error", error=str(e))
+            return {"error": "tool_unavailable", "note": f"web_search error: {e}"}
+
+    def _run_agentic(self, goal: str) -> Dict[str, Any]:
+        try:
+            from .worker import WorkerRunner
+            wr = WorkerRunner(self.cwd, self.run_id)
+            wr._pre_ingest_repo_files()
+        except Exception:
+            pass
+
+        transcript = RunningTranscript(self.run_id)
+        kbus = KnowledgeBus(self.run_dir, self.logger)
+        rllm = RouterLLM(self.cfg, self.logger)
+
+        plan_graph = PlanGraph()
+        plan_graph.mode_by_segment = {"main": self.mode}
+        gates: List[StageGate] = [
+            StageGate(id="sg_api_contract", name="API contract passes", conditions=["tests.pass('api_contract')"]),
+            StageGate(id="sg_be_scaffold", name="Backend scaffold present", conditions=["tests.pass('api_contract') and artifact.exists('backend/**')"]),
+            StageGate(id="sg_fe_scaffold", name="Frontend scaffold present", conditions=["artifact.exists('frontend/**')"]),
+            StageGate(id="sg_smoke", name="Smoke tests pass", conditions=["tests.pass('smoke_suite')"]),
+        ]
+        evaluator = GateEvaluator(self.run_dir, self.artifacts, self.logger)
+        runner = ContractRunner(self.run_dir, self.logger)
+
+        agents: Dict[str, Any] = {}
+        def ensure_agent(role: str):
+            if role in agents:
+                return agents[role]
+            if role == "frontend":
+                agents[role] = FrontendAgent("frontend", self.cfg, self.logger, self.artifacts, self.rag)
+            elif role == "backend":
+                agents[role] = BackendAgent("backend", self.cfg, self.logger, self.artifacts, self.rag)
+            elif role == "llmapi":
+                agents[role] = LLMApiAgent("llmapi", self.cfg, self.logger, self.artifacts, self.rag)
+            elif role == "tests":
+                agents[role] = TestAgent("tests", self.cfg, self.logger, self.artifacts, self.rag)
+            return agents.get(role)
+
+        decisions: List[DecisionSummary] = []
+        injected_by_target: Dict[str, List[str]] = {}
+        unread_huddles: List[Dict[str, Any]] = []
+        current_step: str = "contracts"
+
+        tools = self._build_tools_manifest()
+
+        system_msg = {"role": "system", "content": self._router_system_prompt()}
+        init_state = self._snapshot_state(plan_graph, evaluator, decisions, unread_huddles, tools)
+        user_msg = {
+            "role": "user",
+            "content": (
+                "Goal: " + (goal or "") + "\n\n" +
+                "State: " + json.dumps(init_state, ensure_ascii=False)
+            )
+        }
+        messages: List[Dict[str, Any]] = [system_msg, user_msg]
+
+        finalized = False
+        max_steps = getattr(self.cfg, "router_max_steps", 32) or 32
+        step_idx = 0
+        no_tool_streak = 0
+
+        while step_idx < max_steps and not finalized:
+            step_idx += 1
+            out = rllm._call_with_tools(messages, tools=tools, phase="agentic", tool_choice="auto")
+            raw = out.get("raw") or {}
+            msg_obj = None
+            try:
+                msg_obj = raw.get("choices")[0]["message"]
+            except Exception:
+                msg_obj = None
+            tool_calls = []
+            if msg_obj:
+                try:
+                    tool_calls = msg_obj.get("tool_calls") or []
+                except Exception:
+                    tool_calls = []
+            transcript.add_model_call(
+                title=f"Router Agentic Turn #{step_idx}",
+                provider=out.get("provider") or "?",
+                model=out.get("model") or "?",
+                messages=messages[-6:],
+                output=out.get("text"),
+                tools_offered=tools,
+                tool_choice="auto",
+                tool_calls=tool_calls,
+            )
+
+            if not tool_calls:
+                no_tool_streak += 1
+                if no_tool_streak >= 2:
+                    messages.append({"role": "system", "content": "Reminder: You must act via tools. Pick exactly one tool now."})
+                if msg_obj:
+                    messages.append({"role": "assistant", "content": msg_obj.get("content")})
+                continue
+            no_tool_streak = 0
+
+            tc = tool_calls[0]
+            tool_name = (tc or {}).get("function", {}).get("name") or ""
+            tool_args_s = (tc or {}).get("function", {}).get("arguments") or "{}"
+            try:
+                tool_args = json.loads(tool_args_s)
+            except Exception:
+                tool_args = {}
+            messages.append({"role": "assistant", "content": None, "tool_calls": [tc]})
+
+            obs: Dict[str, Any] = {}
+            err: Optional[str] = None
+            try:
+                if tool_name == "set_mode":
+                    target = (tool_args.get("target_mode") or "").strip().lower()
+                    reason = tool_args.get("reason") or ""
+                    applied = target in ("ladder", "tracks", "weave")
+                    if applied:
+                        prev = self.mode
+                        self.mode = target
+                        plan_graph.mode_by_segment = ({"critical": "ladder", "docs": "tracks"} if self.mode == "weave" else {"main": self.mode})
+                        self.logger.log("mode_decision", previous=prev, current=self.mode, reason=reason)
+                        obs = {"applied": True, "current_mode": self.mode, "note": "mode updated"}
+                    else:
+                        obs = {"applied": False, "current_mode": self.mode, "note": "invalid target_mode"}
+                elif tool_name == "open_huddle":
+                    topic = tool_args.get("topic") or self._huddle_topic(goal)
+                    raw_att = tool_args.get("attendees") or []
+                    agenda = tool_args.get("agenda") or ""
+                    norm_att: List[str] = ["router"]
+                    for a in raw_att:
+                        s = str(a).strip()
+                        if not s:
+                            continue
+                        if s == "router":
+                            if "router" not in norm_att:
+                                norm_att.append("router")
+                            continue
+                        if not s.startswith("agent:"):
+                            s = f"agent:{s}"
+                        if s not in norm_att:
+                            norm_att.append(s)
+                    if len(unread_huddles) >= self._max_open_huddles:
+                        obs = {"error": "huddle_limit_reached", "note": f"max_open_huddles={self._max_open_huddles}"}
+                        self.logger.log("huddle_limit", max_open=self._max_open_huddles, topic=topic, attendees=norm_att)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": (tc.get("id") if isinstance(tc, dict) else None),
+                            "name": tool_name,
+                            "content": json.dumps(obs, ensure_ascii=False),
+                        })
+                        continue
+                    hud_id = f"hud_{ulid()}"
+                    self.logger.log("huddle_open", id=hud_id, topic=topic, requester="router", attendees=norm_att, agenda=agenda)
+                    rec, t_rel, r_rel = save_huddle(
+                        run_dir=self.run_dir, artifacts=self.artifacts, rag_index=self.rag,
+                        requester="router", attendees=norm_att, topic=topic, questions=[agenda] if agenda else [],
+                        notes="Huddle opened by Router LLM.", decisions=[], hud_id=hud_id, mode="dialog", auto_decision=False, messages=[],
+                    )
+                    unread_huddles.append({"huddle_id": hud_id, "topic": topic})
+                    obs = {"huddle_id": hud_id}
+                elif tool_name == "record_decision_summary":
+                    d_obj = {
+                        "topic": tool_args.get("topic") or "",
+                        "options": tool_args.get("options") or [],
+                        "decision": tool_args.get("decision"),
+                        "rationale": tool_args.get("rationale"),
+                        "risks": tool_args.get("risks") or [],
+                        "actions": tool_args.get("actions") or [],
+                        "contracts": tool_args.get("contracts") or [],
+                        "links": tool_args.get("links") or [],
+                        "sources": tool_args.get("sources") or None,
+                    }
+                    hud_id = tool_args.get("huddle_id")
+                    if not hud_id and unread_huddles:
+                        try:
+                            last_hud = unread_huddles[-1]
+                            if isinstance(last_hud, dict):
+                                hud_id = (last_hud or {}).get("huddle_id")
+                            else:
+                                hud_id = None
+                        except Exception:
+                            hud_id = None
+                    transcript_rel = None
+                    if hud_id:
+                        try:
+                            rec_path = os.path.join(self.run_dir, "artifacts", "huddles", f"{hud_id}.json")
+                            if os.path.exists(rec_path):
+                                with open(rec_path, "r", encoding="utf-8") as f:
+                                    rec_obj = json.load(f)
+                                transcript_rel = rec_obj.get("transcript_path")
+                            else:
+                                rec_obj = None
+                        except Exception:
+                            rec_obj = None
+                    ds = parse_decision_summaries(json.dumps(d_obj))[0]
+                    if transcript_rel:
+                        try:
+                            ds.links = (ds.links or []) + [{"type": "artifact", "id": transcript_rel, "title": "Huddle Transcript"}]
+                        except Exception:
+                            pass
+                        try:
+                            base_sources = (ds.sources or [])
+                            base_sources = list(base_sources) if isinstance(base_sources, list) else []
+                            base_sources.append({"type": "artifact", "id": transcript_rel})
+                            ds.sources = base_sources
+                        except Exception:
+                            pass
+                    saved = save_decisions(self.run_dir, self.artifacts, self.rag, [ds])
+                    decisions.append(ds)
+                    if hud_id:
+                        try:
+                            rec_path = os.path.join(self.run_dir, "artifacts", "huddles", f"{hud_id}.json")
+                            if os.path.exists(rec_path):
+                                with open(rec_path, "r", encoding="utf-8") as f:
+                                    rec_obj = json.load(f)
+                                decs = rec_obj.get("decisions") or []
+                                if ds.id not in decs:
+                                    decs.append(ds.id)
+                                rec_obj["decisions"] = decs
+                                with open(rec_path, "w", encoding="utf-8") as f:
+                                    json.dump(rec_obj, f, indent=2)
+                        except Exception:
+                            pass
+                    self.logger.log("decision_summary", decision_id=ds.id, topic=ds.topic, decision=ds.decision)
+                    injected = ["router"]
+                    try:
+                        transcript.add_decision_injection(decision_injection_text([ds]))
+                    except Exception:
+                        pass
+                    try:
+                        for role in list(agents.keys()):
+                            injected.append(f"agent:{role}")
+                    except Exception:
+                        pass
+                    self.logger.log("decision_injected", decision_id=ds.id, targets=injected)
+                    obs = {"decision_id": ds.id, "injected_into": injected}
+                elif tool_name == "inject_summary":
+                    ds_id = tool_args.get("decision_id") or ""
+                    targets = tool_args.get("targets") or []
+                    for t in targets:
+                        injected_by_target.setdefault(t, [])
+                        if ds_id not in injected_by_target[t]:
+                            injected_by_target[t].append(ds_id)
+                    try:
+                        dd = next((d for d in decisions if getattr(d, "id", None) == ds_id), None)
+                        if dd:
+                            transcript.add_decision_injection(decision_injection_text([dd]))
+                    except Exception:
+                        pass
+                    self.logger.log("decision_injected", decision_id=ds_id, targets=targets)
+                    obs = {"targets_injected": list(targets)}
+                elif tool_name == "spawn_agents":
+                    roles = [str(r) for r in (tool_args.get("roles") or [])]
+                    spawned: List[str] = []
+                    already: List[str] = []
+                    for r in roles:
+                        a = ensure_agent(r)
+                        if a is None:
+                            continue
+                        key = f"agent:{r}"
+                        if key in spawned or key in already:
+                            already.append(key)
+                        else:
+                            spawned.append(key)
+                    self.logger.log("agents_spawned", spawned=spawned, already_active=already)
+                    obs = {"spawned": spawned, "already_active": already}
+                elif tool_name == "schedule_slice":
+                    actives = [str(x) for x in (tool_args.get("active_agents") or [])]
+                    artifacts_written: List[str] = []
+                    reports: List[Dict[str, Any]] = []
+                    errors: List[str] = []
+                    auto_added: List[str] = []
+                    skipped_agents: List[str] = []
+                    ctx = {"goal": goal, "decisions": decisions}
+                    try:
+                        if "agent:tests" not in actives and ("tests" in agents or ensure_agent("tests") is not None):
+                            actives.append("agent:tests")
+                            auto_added.append("agent:tests")
+                    except Exception:
+                        pass
+                    if len(actives) > self._max_slice_agents:
+                        skipped_agents = actives[self._max_slice_agents:]
+                        actives = actives[: self._max_slice_agents]
+                        self.logger.log("slice_limit", max_agents=self._max_slice_agents, skipped=skipped_agents)
+                    for an in actives:
+                        role = an.replace("agent:", "").strip()
+                        ag = ensure_agent(role)
+                        if ag is None:
+                            errors.append(f"unknown agent: {an}")
+                            continue
+                        try:
+                            _ = ag.plan(current_step, ctx)
+                        except Exception as e:
+                            errors.append(f"plan error {an}: {e}")
+                        try:
+                            refs = ag.act(ctx)
+                            artifacts_written.extend([r.path for r in refs])
+                            self.logger.log("agent_turn", agent=ag.name, artifacts=[r.path for r in refs])
+                        except Exception as e:
+                            errors.append(f"act error {an}: {e}")
+                        try:
+                            rep = ag.report()
+                            reports.append(asdict(rep))
+                        except Exception:
+                            pass
+                        try:
+                            if hasattr(ag, "needs_huddle") and ag.needs_huddle(ctx):
+                                unread_huddles.append({"from": f"agent:{role}", "topic": self._huddle_topic(goal)})
+                        except Exception:
+                            pass
+                    try:
+                        results = runner.scan_and_run()
+                        _ = evaluator.evaluate(gates)
+                    except Exception:
+                        results = []
+                    obs = {"artifacts_written": artifacts_written, "reports": reports, "errors": errors, "auto_added": auto_added, "skipped_agents": skipped_agents}
+                elif tool_name == "rag_search":
+                    q = tool_args.get("query") or ""
+                    k = int(tool_args.get("top_k") or 5)
+                    hits = self.rag.search(q, top_k=k)
+                    self.logger.log("rag_search", role="router", q=q, top_k=k, hits=[h.get("doc_id") for h in hits])
+                    obs = {"hits": [
+                        {
+                            "doc_id": h.get("doc_id"),
+                            "score": h.get("score"),
+                            "snippet_or_path": (h.get("path") or h.get("snippet")),
+                        } for h in hits
+                    ]}
+                elif tool_name == "web_search":
+                    q = tool_args.get("query") or ""
+                    k = int(tool_args.get("top_k") or 5)
+                    tr = tool_args.get("time_range")
+                    eng = tool_args.get("engines")
+                    obs = self._web_search_exec(q, k, tr, eng)
+                elif tool_name == "run_contract_tests":
+                    tests = [str(t) for t in (tool_args.get("tests") or [])]
+                    results = runner.scan_and_run()
+                    created_tests = False
+                    if not results:
+                        try:
+                            ta = ensure_agent("tests")
+                            if ta is not None:
+                                _ = ta.plan("contract_tests", {"goal": goal, "decisions": decisions})
+                                _ = ta.act({"goal": goal, "decisions": decisions})
+                                results = runner.scan_and_run()
+                                created_tests = True
+                        except Exception:
+                            pass
+                    if tests:
+                        results = [r for r in results if r.id in tests]
+                    obs = {"results": [asdict(r) for r in results], "created_tests": created_tests}
+                elif tool_name == "propose_advance_step":
+                    step_id_raw = tool_args.get("step_id") or current_step
+                    gate_to_step = {
+                        "sg_api_contract": "contracts",
+                        "sg_be_scaffold": "backend_scaffold",
+                        "sg_fe_scaffold": "frontend_scaffold",
+                        "sg_smoke": "smoke_tests",
+                    }
+                    step_id = gate_to_step.get(step_id_raw, step_id_raw)
+                    valid_steps = ["contracts", "backend_scaffold", "frontend_scaffold", "smoke_tests"]
+                    if step_id not in valid_steps:
+                        obs = {"advanced": False, "error": "unknown_step", "step_id": step_id_raw}
+                        self.logger.log("advance_rejected", reason="unknown_step", requested=step_id_raw)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": (tc.get("id") if isinstance(tc, dict) else None),
+                            "name": tool_name,
+                            "content": json.dumps(obs, ensure_ascii=False),
+                        })
+                        continue
+                    def gates_for(step: str) -> List[StageGate]:
+                        if step == "contracts":
+                            return [g for g in gates if g.id == 'sg_api_contract']
+                        if step == "backend_scaffold":
+                            return [g for g in gates if g.id in ('sg_api_contract','sg_be_scaffold')]
+                        if step == "frontend_scaffold":
+                            return [g for g in gates if g.id in ('sg_fe_scaffold',)]
+                        if step == "smoke_tests":
+                            return [g for g in gates if g.id in ('sg_smoke','sg_fe_scaffold','sg_be_scaffold','sg_api_contract')]
+                        return gates
+                    gres = evaluator.evaluate(gates_for(step_id))
+                    if all(g.status == "passed" for g in gres):
+                        order = ["contracts", "backend_scaffold", "frontend_scaffold", "smoke_tests"]
+                        try:
+                            idx = order.index(step_id)
+                            next_step = order[min(idx + 1, len(order) - 1)]
+                        except Exception:
+                            next_step = step_id
+                        current_step = next_step
+                        if step_id in self._gate_failures:
+                            self._gate_failures.pop(step_id, None)
+                        obs = {"advanced": True, "next_step": next_step}
+                    else:
+                        import time as _t
+                        now = _t.time()
+                        cnt, last = self._gate_failures.get(step_id, (0, 0.0))
+                        cnt = cnt + 1
+                        self._gate_failures[step_id] = (cnt, now)
+                        cooldown_active = (cnt >= self._cooldown_threshold) and ((now - last) <= 60.0)
+                        retry_after_ms = int(self._cooldown_seconds * 1000) if cooldown_active else 0
+                        if cooldown_active:
+                            self.logger.log("router_cooldown", step=step_id, failures=cnt, retry_after_ms=retry_after_ms)
+                        obs = {"advanced": False,
+                               "failed_gates": [
+                                   {"id": g.id, "status": g.status, "evidence": g.evidence} for g in gres if g.status != "passed"
+                               ],
+                               "cooldown_active": cooldown_active,
+                               "retry_after_ms": retry_after_ms}
+                elif tool_name == "write_artifact":
+                    rel = tool_args.get("path") or ""
+                    content = tool_args.get("content") or ""
+                    tags = tool_args.get("tags") or []
+                    if not rel.startswith("artifacts/"):
+                        rel = os.path.join("artifacts", rel)
+                    if not rel.startswith("artifacts/"):
+                        raise ValueError("writes must be under artifacts/")
+                    art = self.artifacts.add_text(rel.replace("artifacts/", ""), content, tags=tags, meta={"by": "router"})
+                    try:
+                        self.rag.ingest_text(art.id, content, art.path)
+                        self.logger.log("rag_ingest_router", doc_id=art.id, path=art.path)
+                    except Exception:
+                        pass
+                    obs = {"path": art.path, "hash": f"sha256:{art.sha256}", "size": len(content.encode('utf-8'))}
+                elif tool_name == "read_artifact":
+                    rel = tool_args.get("path") or ""
+                    if not rel.startswith("artifacts/"):
+                        rel = os.path.join("artifacts", rel)
+                    abspath = os.path.join(self.run_dir, rel)
+                    with open(abspath, "r", encoding="utf-8", errors="ignore") as f:
+                        content = f.read(200_000)
+                    import hashlib
+                    h = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                    obs = {"path": rel, "content": content, "mime": "text/plain", "hash": f"sha256:{h}"}
+                elif tool_name == "finalize_run":
+                    report = run_finalization(self.run_dir, self.artifacts, self.logger, decisions, evaluator)
+                    deliverables = report.get("deliverables", [None])[0]
+                    obs = {"deliverables": deliverables, "report": os.path.join("artifacts", "finalization", "report.json")}
+                    finalized = True
+                else:
+                    err = f"unknown tool: {tool_name}"
+                    obs = {"error": err}
+            except Exception as e:
+                err = str(e)
+                obs = {"error": err}
+            self.logger.log("router_tool_call", tool_name=tool_name, params=tool_args, observation=(obs if len(str(obs)) < 5000 else {"note": "obs too large"}), error=err)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": (tc.get("id") if isinstance(tc, dict) else None),
+                "name": tool_name,
+                "content": json.dumps(obs, ensure_ascii=False),
+            })
+
+            if step_idx % 3 == 0 or finalized:
+                snap = self._snapshot_state(plan_graph, evaluator, decisions, unread_huddles, tools)
+                messages.append({"role": "system", "content": "State update: " + json.dumps(snap, ensure_ascii=False)})
+
+        if not finalized:
+            report = run_finalization(self.run_dir, self.artifacts, self.logger, decisions, evaluator)
+            deliverables = report.get("deliverables", [None])[0]
+            self.logger.log("router_finalize_auto", reason="budget_exhausted", steps=step_idx)
+
+        try:
+            plan_graph.save(self.run_dir)
+        except Exception:
+            pass
+
+        try:
+            snap_path = os.path.join(self.run_dir, "artifacts", "plans", "snapshot.json")
+            os.makedirs(os.path.dirname(snap_path), exist_ok=True)
+            if not os.path.exists(snap_path):
+                with open(snap_path, "w", encoding="utf-8") as f:
+                    json.dump([], f)
+        except Exception:
+            pass
+
+        try:
+            transcript_md = transcript.render_markdown()
+            self.artifacts.add_text(
+                "transcript.md",
+                transcript_md,
+                tags=["transcript", "router"],
+                meta={},
+            )
+        except Exception:
+            pass
+
+        summary = self._build_summary(agents or {}, evaluator, decisions)
         summary["finalization_report"] = os.path.join("artifacts", "finalization", "report.json")
         self.artifacts.add_text("run_summary.json", json.dumps(summary, indent=2), tags=["summary"])
         self.logger.log("run_complete", summary_path=os.path.join(self.run_dir, "artifacts", "run_summary.json"))

@@ -1,15 +1,12 @@
 import json
 import time
-from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
 from .config import ProviderConfig
-
-
-class ProviderError(Exception):
-    pass
+from .constants import DEFAULT_HTTP_TIMEOUT, DEFAULT_RETRY_COUNT, DEFAULT_MAX_RETRY_DELAY
+from .errors import ProviderError, handle_provider_error
 
 
 def _is_rate_limited(status: int, data: Any) -> bool:
@@ -64,18 +61,26 @@ class OpenAICompatProvider:
         if tool_choice:
             body["tool_choice"] = tool_choice
 
-        resp = requests.post(url, headers=self._headers(), params=self._params(), json=body, timeout=60)
+        resp = requests.post(url, headers=self._headers(), params=self._params(), json=body, timeout=DEFAULT_HTTP_TIMEOUT)
         try:
             data = resp.json()
         except Exception:
             data = {"text": resp.text}
 
         if not resp.ok:
-            raise ProviderError(f"HTTP {resp.status_code}: {data}")
+            raise ProviderError(
+                f"HTTP {resp.status_code}: {data}",
+                self.cfg.name,
+                context={"status_code": resp.status_code, "response_data": data}
+            )
         try:
             content = data["choices"][0]["message"].get("content") or ""
         except Exception as e:
-            raise ProviderError(f"Unexpected response format: {e}; data={data}")
+            raise ProviderError(
+                f"Unexpected response format: {e}; data={data}",
+                self.cfg.name,
+                context={"response_data": data, "parse_error": str(e)}
+            )
         return content, data
 
 
@@ -86,7 +91,7 @@ def call_with_fallback(
     temperature: float,
     max_tokens: Optional[int],
     logger,
-    retries: int = 2,
+    retries: int = DEFAULT_RETRY_COUNT,
     tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Optional[str] = None,
     model_overrides: Optional[Dict[str, str]] = None,
@@ -128,11 +133,18 @@ def call_with_fallback(
                 return name, cfg.base_url, model, raw, attempt
             except Exception as e:
                 attempt += 1
-                last_err = str(e)
+                provider_error = handle_provider_error(e, name, attempt)
+                last_err = str(provider_error)
+                
                 transient = True
-                if isinstance(e, ProviderError) and "HTTP" in str(e):
-                    m = str(e)
-                    transient = any(code in m for code in ["429", "500", "502", "503", "504"])
+                if isinstance(provider_error, ProviderError):
+                    context = provider_error.context
+                    status_code = context.get("status_code")
+                    if status_code:
+                        transient = status_code in [429, 500, 502, 503, 504]
+                    elif "HTTP" in str(provider_error):
+                        m = str(provider_error)
+                        transient = any(code in m for code in ["429", "500", "502", "503", "504"])
                 logger.log(
                     "model_call",
                     provider=name,
@@ -144,12 +156,13 @@ def call_with_fallback(
                     output=None,
                     raw_response=None,
                     duration_sec=None,
-                    error=str(e),
+                    error=str(provider_error),
+                    error_context=(provider_error.context if isinstance(provider_error, ProviderError) else None),
                     retries=attempt,
                     fallback_chain=order,
                 )
                 if attempt <= retries and transient:
-                    time.sleep(min(2 ** attempt, 8))
+                    time.sleep(min(2 ** attempt, DEFAULT_MAX_RETRY_DELAY))
                 else:
                     break
     raise ProviderError(f"All providers failed. Last error: {last_err}")

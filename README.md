@@ -1,12 +1,13 @@
-LATTICE — CLI Orchestrator with Weave Mode, Replanning, Provenance, and Finalization (M4)
+LATTICE — Router Action Loop with Tools, Weave Mode, Provenance, and Finalization (M4.5)
 
 LATTICE is a CLI‑only, single‑process orchestration runtime. It coordinates multiple agents via a deterministic Router, runs contract tests and stage gates, captures provenance, supports mid‑flight replanning, and emits a rigorous finalization report and deliverables.
 
-Highlights (Milestone 4)
-- Weave mode: Hybrid execution (Ladder on the critical path + a Docs track in parallel).
-- Mid‑flight mode switching with structured reasons and huddles.
-- Provenance & citations plumbing (artifacts + RAG docs) with a knowledge signal hook.
-- Finalization pass: drift checks, decision log with inline citations, citation index, deliverables zip.
+Highlights (Milestone 4.5)
+- LLM‑driven Router action loop: the Router LLM chooses modes, opens huddles, records DecisionSummaries, spawns/schedules sub‑agents, runs RAG/web search (if available), executes contract tests, and finalizes.
+- Router Tools exposed as function calls: set_mode, open_huddle, record_decision_summary, inject_summary, spawn_agents, schedule_slice, rag_search, web_search (Groq or adapter), run_contract_tests, propose_advance_step, write_artifact, read_artifact, finalize_run.
+- Host‑enforced safety: stage gates are authoritative (advance only via propose_advance_step), artifacts/logs persisted immutably under artifacts/, summaries injected compactly, and all actions/observations are logged.
+- Weave mode retained: Hybrid critical path + docs track, and mid‑flight replanning via knowledge signals and huddles.
+- Provenance & citations retained from M4 and consolidated during finalization.
 
 
 Getting Started
@@ -19,8 +20,8 @@ Getting Started
 CLI Commands
 
 - lattice run "<goal>"
-  - Orchestrates Router + agents to plan, scaffold, test, evaluate gates, replan if needed, and finalize.
-  - Emits `runs/<run_id>/artifacts/*`, structured logs `run.jsonl`, PlanGraph, DecisionSummaries, knowledge journal, and a finalization report.
+  - Default: Router runs the LLM‑driven action loop (M4.5). The LLM selects a mode (often weave for README/docs), spawns agents, schedules slices, opens huddles and records DecisionSummaries, queries RAG/web, requests gate advances, and calls finalize_run.
+  - Emits `runs/<run_id>/artifacts/*`, structured logs `run.jsonl`, PlanGraph snapshot, DecisionSummaries, knowledge journal, and a finalization report with a deliverables zip.
 
 - lattice logs <run_id> [--follow] [--output-only|-O]
   - Prints the JSONL log or formatted model outputs.
@@ -46,14 +47,22 @@ Providers & Environment
   - Temperature/tokens: `LATTICE_TEMPERATURE`, `LATTICE_MAX_TOKENS`
   - Huddles mode: `LATTICE_HUDDLES=dialog|synthesis`
   - Initial mode: `LATTICE_MODE=ladder|tracks|weave`
+  - Router policy (M4 compatibility): `LATTICE_ROUTER_POLICY=llm|policy` (default: `llm`). Set `policy` to revert to deterministic M4 router.
+  - Router action budget: `LATTICE_ROUTER_MAX_STEPS=32`
+  - Web search tool exposure (Router): `LATTICE_WEB_SEARCH=auto|on|off` (default: auto; enabled when Groq is in the Router chain or an adapter URL is set). Optional adapter: `LATTICE_WEB_SEARCH_ADAPTER_URL=...`
 
 
 Key Concepts
 
-- Router modes
+- Router modes & action loop
   - Ladder: strictly ordered critical path.
   - Tracks: parallel slices across agents.
   - Weave (M4): Ladder on the critical path, with a Docs/README track in parallel. A minimal PlanGraph is saved to `artifacts/plans/plan_graph.json` with nodes, edges, segment modes, and `reasons[]` (switch/replan causes).
+  - Router LLM (M4.5): Operates an agentic loop. Each LLM turn issues exactly one tool call; the host executes it and returns an observation. The loop ends when the LLM calls `finalize_run` or the safety budget is reached.
+
+- Router Tools (LLM‑visible)
+  - set_mode, open_huddle, record_decision_summary, inject_summary, spawn_agents, schedule_slice, rag_search, web_search (Groq/browser_search or adapter), run_contract_tests, propose_advance_step, write_artifact, read_artifact, finalize_run.
+  - Stage gates are authoritative: use `propose_advance_step` to move forward. The host evaluates gates and blocks when failing.
 
 - Huddles → DecisionSummaries
   - The Router convenes agents. A Router LLM synthesizes 1–3 DecisionSummary JSON objects with topic, options, decision, rationale, risks, actions, contracts, links.
@@ -81,9 +90,9 @@ Key Concepts
 
 Example Workflow
 
-1) Run Weave for a CLI app with docs in parallel
+1) Run a small CLI app with README
    - `lattice run "ship a small CLI + README"`
-   - If your goal mentions “readme”/“docs” the Router will prefer Weave. Critical path: contracts → backend scaffold → smoke tests. Docs track drafts a README in parallel.
+   - The Router LLM usually selects weave, spawns agents, schedules slices, opens a huddle to pin API and records DecisionSummaries (with citations), runs contract tests, requests gate advances, and calls finalize_run.
 
 2) Simulate a knowledge update (optional)
    - Write a drop‑in under `runs/<run_id>/artifacts/knowledge/new_info.json` with `source` and `refs[]`.
@@ -128,4 +137,3 @@ Development Map (selected files)
 - `src/lattice/provenance.py` — EvidenceRef types + helpers
 - `src/lattice/finalize.py` — Finalization pass (drift, decision log, citations, zip)
 - `src/lattice/cli.py` — CLI entry (run/logs/scrub)
-

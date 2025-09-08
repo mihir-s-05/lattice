@@ -13,7 +13,7 @@ from .runlog import RunLogger
 @dataclass
 class ContractTestResult:
     id: str
-    status: str  
+    status: str
     metrics: Dict[str, Any]
     evidence: List[Dict[str, Any]]
 

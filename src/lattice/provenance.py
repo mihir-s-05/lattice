@@ -11,14 +11,14 @@ from .artifacts import Artifact, ArtifactStore, sha256_bytes
 @dataclass
 class EvidenceArtifact:
     type: Literal["artifact"] = "artifact"
-    id: str = ""  
-    hash: str = ""  
+    id: str = ""
+    hash: str = ""
 
 
 @dataclass
 class EvidenceRagDoc:
     type: Literal["rag_doc"] = "rag_doc"
-    id: str = ""  
+    id: str = ""
     score: float = 0.0
     hash: Optional[str] = None
 
@@ -52,7 +52,7 @@ def evidence_list_to_jsonable(evs: Optional[List[EvidenceRef]]) -> List[Dict[str
             out.append(asdict(e))
         except Exception:
             if isinstance(e, dict):
-                out.append(e)  
+                out.append(e)
     return out
 
 

@@ -4,6 +4,12 @@ import os
 import re
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Tuple
+from .constants import (
+    DEFAULT_RAG_TOKEN_LIMIT,
+    DEFAULT_RAG_SNIPPET_LENGTH,
+    DEFAULT_RAG_TOP_K,
+    DEFAULT_RAG_MAX_FILE_SIZE
+)
 
 
 WORD_RE = re.compile(r"[A-Za-z0-9_]+")
@@ -94,15 +100,15 @@ class RagIndex:
         tokens = tokenize(text)
         self.docs[doc_id] = {
             "path": path,
-            "tokens": tokens[:50000],
-            "snippet": text[:500],
+            "tokens": tokens[:DEFAULT_RAG_TOKEN_LIMIT],
+            "snippet": text[:DEFAULT_RAG_SNIPPET_LENGTH],
         }
         self._recompute_idf()
         vec = self._tfidf(tokens)
         self.doc_vectors[doc_id] = vec
         self._save()
 
-    def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    def search(self, query: str, top_k: int = DEFAULT_RAG_TOP_K) -> List[Dict[str, Any]]:
         tokens = tokenize(query)
         qvec = self._tfidf(tokens)
         scored: List[Tuple[str, float]] = []
@@ -122,7 +128,7 @@ class RagIndex:
             })
         return out
 
-    def ingest_file(self, path: str, doc_id: str, max_bytes: int = 1024 * 1024) -> None:
+    def ingest_file(self, path: str, doc_id: str, max_bytes: int = DEFAULT_RAG_MAX_FILE_SIZE) -> None:
         try:
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 text = f.read(max_bytes)

@@ -8,10 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .ids import ulid
 from .artifacts import ArtifactStore
 from .rag import RagIndex
-
-
-DECISION_DIR = "artifacts/decisions"
-HUDDLE_DIR = "artifacts/huddles"
+from .constants import DEFAULT_HUDDLE_DIR
 
 
 def ensure_dir(path: str) -> None:
@@ -145,9 +142,6 @@ def save_decisions(
     
     out: List[Tuple[DecisionSummary, str]] = []
     for d in decisions:
-        rel_dir = DECISION_DIR
-        abs_dir = os.path.join(run_dir, rel_dir)
-        ensure_dir(abs_dir)
         art = artifacts.add_text(
             filename=os.path.join("decisions", f"{d.id}.json"),
             text=json.dumps(asdict(d), ensure_ascii=False, indent=2),
@@ -180,7 +174,7 @@ def save_huddle(
 ) -> Tuple[HuddleRecord, str, str]:
     
     hud_id = hud_id or f"hud_{ulid()}"
-    rel_dir = HUDDLE_DIR
+    rel_dir = DEFAULT_HUDDLE_DIR
     abs_dir = os.path.join(run_dir, rel_dir)
     ensure_dir(abs_dir)
     transcript_rel = os.path.join(rel_dir, f"{hud_id}.md")

@@ -20,6 +20,12 @@ from .huddle import (
     decision_injection_text,
 )
 from .transcript import RunningTranscript
+from .constants import (
+    DEFAULT_RAG_MIN_SCORE,
+    DEFAULT_RAG_MAX_INGEST_FILES,
+    DEFAULT_RAG_MAX_FILE_SIZE,
+    RAG_INGEST_PATTERNS
+)
 
 
 def gen_run_id() -> str:
@@ -107,7 +113,7 @@ class WorkerRunner:
         try:
             w_provider, w_base, w_model, w_raw, w_attempts = call_with_fallback(
                 providers=self.cfg.providers,
-                order=self.cfg.provider_order,
+                order=self.cfg.router_provider_order,
                 messages=worker_messages,
                 temperature=self.cfg.temperature,
                 max_tokens=self.cfg.max_tokens,
@@ -152,7 +158,7 @@ class WorkerRunner:
         try:
             r_provider, r_base, r_model, r_raw, r_attempts = call_with_fallback(
                 providers=self.cfg.providers,
-                order=self.cfg.provider_order,
+                order=self.cfg.router_provider_order,
                 messages=router_close_messages,
                 temperature=self.cfg.temperature,
                 max_tokens=self.cfg.max_tokens,
@@ -285,9 +291,9 @@ class WorkerRunner:
             rag_queries.append(q)
             hits = self.rag_index.search(q, top_k=3)
             try:
-                min_score = float(os.environ.get("LATTICE_RAG_MIN_SCORE", "0.15"))
+                min_score = float(os.environ.get("LATTICE_RAG_MIN_SCORE", str(DEFAULT_RAG_MIN_SCORE)))
             except Exception:
-                min_score = 0.15
+                min_score = DEFAULT_RAG_MIN_SCORE
             filtered_hits = [h for h in (hits or []) if float(h.get("score", 0.0)) >= min_score]
             rag_hits = filtered_hits
             ctx_parts = []
@@ -369,7 +375,7 @@ class WorkerRunner:
         try:
             provider_name_1, base_url_1, model_1, raw_1, attempts_1 = call_with_fallback(
                 providers=self.cfg.providers,
-                order=self.cfg.provider_order,
+                order=self.cfg.router_provider_order,
                 messages=router_messages,
                 temperature=self.cfg.temperature,
                 max_tokens=self.cfg.max_tokens,
@@ -460,7 +466,7 @@ class WorkerRunner:
         try:
             provider_name, base_url, model, raw, attempts = call_with_fallback(
                 providers=self.cfg.providers,
-                order=self.cfg.provider_order,
+                order=self.cfg.router_provider_order,
                 messages=final_messages,
                 temperature=self.cfg.temperature,
                 max_tokens=self.cfg.max_tokens,
@@ -474,7 +480,7 @@ class WorkerRunner:
                 guarded.insert(0, {"role": "system", "content": "Tools are disabled. Do not call any tools. Return plain text only."})
                 provider_name, base_url, model, raw, attempts = call_with_fallback(
                     providers=self.cfg.providers,
-                    order=self.cfg.provider_order,
+                    order=self.cfg.router_provider_order,
                     messages=guarded,
                     temperature=self.cfg.temperature,
                     max_tokens=self.cfg.max_tokens,
@@ -565,14 +571,8 @@ class WorkerRunner:
         }
 
     def _pre_ingest_repo_files(self) -> None:
-        patterns = [
-            "README*",
-            "readme*",
-            os.path.join("docs", "**", "*.md"),
-            os.path.join("docs", "**", "*.txt"),
-            "documentation.txt",
-        ]
-        max_files = int(os.environ.get("LATTICE_RAG_MAX_INGEST", "20"))
+        patterns = RAG_INGEST_PATTERNS
+        max_files = int(os.environ.get("LATTICE_RAG_MAX_INGEST", str(DEFAULT_RAG_MAX_INGEST_FILES)))
         candidates: List[str] = []
         for pat in patterns:
             for p in glob.glob(os.path.join(self.cwd, pat), recursive=True):
@@ -587,7 +587,7 @@ class WorkerRunner:
         for path in unique[:max_files]:
             try:
                 with open(path, "rb") as f:
-                    raw = f.read(1024 * 1024)
+                    raw = f.read(DEFAULT_RAG_MAX_FILE_SIZE)
                 digest = hashlib.sha256(raw + path.encode("utf-8")).hexdigest()
                 doc_id = digest[:16]
             except Exception as e:
@@ -595,6 +595,6 @@ class WorkerRunner:
                 continue
             try:
                 self.rag_index.ingest_file(path, doc_id)
-                self.logger.log("rag_ingest", path=path, doc_id=doc_id, bytes=min(len(raw), 1024 * 1024))
+                self.logger.log("rag_ingest", path=path, doc_id=doc_id, bytes=min(len(raw), DEFAULT_RAG_MAX_FILE_SIZE))
             except Exception as e:
                 self.logger.log("rag_ingest_error", path=path, error=str(e))

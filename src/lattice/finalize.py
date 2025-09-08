@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import zipfile
-from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Tuple
 
 from .artifacts import ArtifactStore
@@ -11,6 +10,17 @@ from .runlog import RunLogger
 from .stage_gates import GateEvaluator, StageGate
 from .huddle import DecisionSummary
 from .provenance import compute_current_sha256
+from .constants import (
+    DEFAULT_DECISION_DIR,
+    DEFAULT_BACKEND_DIR,
+    DEFAULT_FRONTEND_DIR, 
+    DEFAULT_CONTRACTS_DIR,
+    DEFAULT_RESULTS_DIR,
+    DEFAULT_DELIVERABLES_FILE,
+    DEFAULT_DECISION_LOG_FILE,
+    DEFAULT_CITATIONS_INDEX_FILE,
+    DEFAULT_CITATIONS_DIR
+)
 
 
 def _ensure_dir(path: str) -> None:
@@ -18,7 +28,7 @@ def _ensure_dir(path: str) -> None:
 
 
 def _collect_test_results(run_dir: str) -> List[Dict[str, Any]]:
-    base = os.path.join(run_dir, "artifacts", "contracts", "results")
+    base = os.path.join(run_dir, DEFAULT_RESULTS_DIR)
     out: List[Dict[str, Any]] = []
     if not os.path.isdir(base):
         return out
@@ -34,13 +44,13 @@ def _collect_test_results(run_dir: str) -> List[Dict[str, Any]]:
 
 
 def _create_deliverables_zip(run_dir: str) -> str:
-    rel = os.path.join("artifacts", "deliverables", "deliverables.zip")
+    rel = os.path.join("artifacts", "deliverables", DEFAULT_DELIVERABLES_FILE)
     abs_path = os.path.join(run_dir, rel)
     _ensure_dir(os.path.dirname(abs_path))
     roots = [
-        os.path.join(run_dir, "artifacts", "backend"),
-        os.path.join(run_dir, "artifacts", "frontend"),
-        os.path.join(run_dir, "artifacts", "contracts"),
+        os.path.join(run_dir, DEFAULT_BACKEND_DIR),
+        os.path.join(run_dir, DEFAULT_FRONTEND_DIR),
+        os.path.join(run_dir, DEFAULT_CONTRACTS_DIR),
     ]
     readme = os.path.join(run_dir, "artifacts", "README.md")
     with zipfile.ZipFile(abs_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -58,9 +68,9 @@ def _create_deliverables_zip(run_dir: str) -> str:
 
 
 def _write_decision_log_and_citations(run_dir: str, decisions: List[DecisionSummary], logger: RunLogger) -> Tuple[str, str]:
-    dec_dir = os.path.join(run_dir, "artifacts", "decisions")
+    dec_dir = os.path.join(run_dir, DEFAULT_DECISION_DIR)
     _ensure_dir(dec_dir)
-    log_rel = os.path.join("artifacts", "decisions", "decision_log.md")
+    log_rel = os.path.join(DEFAULT_DECISION_DIR, DEFAULT_DECISION_LOG_FILE)
     log_abs = os.path.join(run_dir, log_rel)
     lines: List[str] = ["# Decision Log", ""]
     cite_index: Dict[str, List[Dict[str, Any]]] = {}
@@ -82,11 +92,11 @@ def _write_decision_log_and_citations(run_dir: str, decisions: List[DecisionSumm
                     continue
         lines.append("")
         if d.sources:
-            cite_index[d.id] = list(d.sources)  
+            cite_index[d.id] = list(d.sources)
             logger.log("citations_indexed", ds_id=d.id, sources=d.sources)
     with open(log_abs, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
-    cite_rel = os.path.join("artifacts", "citations", "index.json")
+    cite_rel = os.path.join(DEFAULT_CITATIONS_DIR, DEFAULT_CITATIONS_INDEX_FILE)
     cite_abs = os.path.join(run_dir, cite_rel)
     _ensure_dir(os.path.dirname(cite_abs))
     with open(cite_abs, "w", encoding="utf-8") as f:
@@ -111,7 +121,7 @@ def _compute_drift(run_dir: str, decisions: List[DecisionSummary]) -> List[Dict[
                         })
             except Exception:
                 continue
-    current_openapi = os.path.join("artifacts", "contracts", "openapi.yaml")
+    current_openapi = os.path.join(DEFAULT_CONTRACTS_DIR, "openapi.yaml")
     current_hash = compute_current_sha256(run_dir, current_openapi)
     if current_hash:
         for d in decisions:
@@ -158,5 +168,5 @@ def run_finalization(
         "decision_log_path": dec_log_rel,
         "citation_index_path": cite_rel,
     }
-    artifacts.add_text(os.path.join("finalization", "report.json"), json.dumps(report, indent=2), tags=["finalization"])  
+    artifacts.add_text(os.path.join("finalization", "report.json"), json.dumps(report, indent=2), tags=["finalization"])
     return report
