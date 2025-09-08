@@ -5,7 +5,6 @@ from .errors import TemplateError, handle_template_error
 
 
 class TemplateLoader:
-    """Loads and renders templates from the templates directory."""
     
     def __init__(self, template_root: Optional[str] = None):
         if template_root is None:
@@ -14,7 +13,6 @@ class TemplateLoader:
             self.template_root = Path(template_root)
     
     def load_template(self, template_path: str) -> str:
-        """Load a template file and return its contents."""
         full_path = self.template_root / template_path
         try:
             with open(full_path, 'r', encoding='utf-8') as f:
@@ -25,7 +23,6 @@ class TemplateLoader:
             raise handle_template_error(e, template_path)
     
     def render_template(self, template_path: str, context: Optional[Dict[str, Any]] = None) -> str:
-        """Load and render a template with the given context variables."""
         template_content = self.load_template(template_path)
         
         if context is None:
@@ -39,7 +36,6 @@ class TemplateLoader:
         return rendered
     
     def get_frontend_templates(self, context: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
-        """Get all frontend template files rendered with context."""
         templates = {}
         frontend_path = self.template_root / "frontend"
         
@@ -57,7 +53,6 @@ class TemplateLoader:
         return templates
     
     def get_backend_templates(self, context: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
-        """Get all backend template files rendered with context."""
         templates = {}
         backend_path = self.template_root / "backend"
         
@@ -75,7 +70,6 @@ class TemplateLoader:
         return templates
     
     def get_cli_templates(self, context: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
-        """Get all CLI template files rendered with context."""
         templates = {}
         cli_path = self.template_root / "cli"
         
@@ -96,7 +90,6 @@ class TemplateLoader:
 _template_loader = None
 
 def get_template_loader() -> TemplateLoader:
-    """Get the global template loader instance."""
     global _template_loader
     if _template_loader is None:
         _template_loader = TemplateLoader()
@@ -104,20 +97,16 @@ def get_template_loader() -> TemplateLoader:
 
 
 def render_template(template_path: str, context: Optional[Dict[str, Any]] = None) -> str:
-    """Convenience function to render a template with the global loader."""
     return get_template_loader().render_template(template_path, context)
 
 
 def get_frontend_templates(context: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
-    """Convenience function to get frontend templates."""
     return get_template_loader().get_frontend_templates(context)
 
 
 def get_backend_templates(context: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
-    """Convenience function to get backend templates."""
     return get_template_loader().get_backend_templates(context)
 
 
 def get_cli_templates(context: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
-    """Convenience function to get CLI templates."""
     return get_template_loader().get_cli_templates(context)

@@ -21,7 +21,6 @@ from .constants import (
 
 @dataclass
 class ProviderConfig:
-    """Configuration for a single LLM provider."""
     name: str
     base_url: str
     api_key: Optional[str] = None
@@ -30,16 +29,14 @@ class ProviderConfig:
     extra_params: Optional[Dict[str, Any]] = None
     
     def to_public_dict(self) -> Dict[str, Any]:
-        """Export config with sensitive data redacted."""
         result = asdict(self)
         if result.get("api_key"):
             result["api_key"] = "REDACTED"
         return result
 
 
-@dataclass 
+@dataclass
 class SystemLimits:
-    """System-wide limits and timeouts."""
     temperature: float = DEFAULT_TEMPERATURE
     max_tokens: Optional[int] = None
     router_max_steps: int = DEFAULT_ROUTER_MAX_STEPS
@@ -50,7 +47,6 @@ class SystemLimits:
 
 @dataclass
 class RagConfig:
-    """RAG system configuration."""
     enabled: bool = True
     min_score: float = 0.15
     max_ingest_files: int = 20
@@ -62,7 +58,6 @@ class RagConfig:
 
 @dataclass
 class ExecutionConfig:
-    """Execution mode and policy configuration."""
     mode: str = DEFAULT_EXECUTION_MODE
     huddle_mode: str = DEFAULT_HUDDLE_MODE
     router_policy: str = DEFAULT_ROUTER_POLICY
@@ -70,7 +65,6 @@ class ExecutionConfig:
     web_search_mode: str = DEFAULT_WEB_SEARCH_MODE
     
     def __post_init__(self):
-        """Validate configuration values."""
         if self.mode not in SUPPORTED_EXECUTION_MODES:
             self.mode = DEFAULT_EXECUTION_MODE
         if self.huddle_mode not in SUPPORTED_HUDDLE_MODES:
@@ -83,7 +77,6 @@ class ExecutionConfig:
 
 @dataclass
 class RunConfig:
-    """Complete runtime configuration for a Lattice run."""
     run_id: str
     providers: Dict[str, ProviderConfig]
     router_provider_order: List[str]
@@ -94,6 +87,9 @@ class RunConfig:
     limits: SystemLimits = field(default_factory=SystemLimits)
     rag: RagConfig = field(default_factory=RagConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+
+
+    websearch_adapter: Optional[Dict[str, Any]] = None
     @property
     def temperature(self) -> float:
         return self.limits.temperature
@@ -123,13 +119,12 @@ class RunConfig:
         return self.limits.router_max_steps
 
     def to_public_dict(self) -> Dict[str, Any]:
-        """Export configuration with sensitive data redacted."""
         providers_public = {
             name: provider.to_public_dict() 
             for name, provider in self.providers.items()
         }
         
-        return {
+        out = {
             "run_id": self.run_id,
             "router_provider_order": self.router_provider_order,
             "agent_provider_order": self.agent_provider_order,
@@ -140,23 +135,26 @@ class RunConfig:
             "rag": asdict(self.rag),
             "execution": asdict(self.execution)
         }
+        if self.websearch_adapter:
+
+            redact_keys = {"firecrawl_api_key"}
+            scrubbed = {k: ("REDACTED" if k in redact_keys and self.websearch_adapter.get(k) else v)
+                        for k, v in self.websearch_adapter.items()}
+            out["websearch_adapter"] = scrubbed
+        return out
 
     def to_json(self) -> str:
-        """Serialize to JSON string."""
         return json.dumps(self.to_public_dict(), indent=2)
 
 
 class ConfigurationFactory:
-    """Factory for creating configuration objects with proper validation."""
     
     @staticmethod
     def _get_env(key: str, default: Optional[str] = None) -> Optional[str]:
-        """Get environment variable value."""
         return os.environ.get(key, default)
     
-    @staticmethod 
+    @staticmethod
     def _get_env_bool(key: str, default: bool) -> bool:
-        """Get boolean environment variable."""
         value = os.environ.get(key, "").lower()
         if value in ("1", "true", "yes", "on"):
             return True
@@ -166,7 +164,6 @@ class ConfigurationFactory:
         
     @staticmethod
     def _get_env_int(key: str, default: int) -> int:
-        """Get integer environment variable."""
         try:
             return int(os.environ.get(key, str(default)))
         except (ValueError, TypeError):
@@ -174,7 +171,6 @@ class ConfigurationFactory:
             
     @staticmethod
     def _get_env_float(key: str, default: float) -> float:
-        """Get float environment variable."""
         try:
             return float(os.environ.get(key, str(default)))
         except (ValueError, TypeError):
@@ -182,7 +178,6 @@ class ConfigurationFactory:
 
     @classmethod
     def create_provider_configs(cls) -> Dict[str, ProviderConfig]:
-        """Create provider configurations from environment."""
         providers = {}
         
         providers["groq"] = ProviderConfig(
@@ -210,16 +205,14 @@ class ConfigurationFactory:
     
     @classmethod
     def create_system_limits(cls) -> SystemLimits:
-        """Create system limits from environment."""
         return SystemLimits(
             temperature=cls._get_env_float("LATTICE_TEMPERATURE", DEFAULT_TEMPERATURE),
             max_tokens=cls._get_env_int("LATTICE_MAX_TOKENS", 0) or None,
             router_max_steps=cls._get_env_int("LATTICE_ROUTER_MAX_STEPS", DEFAULT_ROUTER_MAX_STEPS)
         )
     
-    @classmethod  
+    @classmethod
     def create_rag_config(cls) -> RagConfig:
-        """Create RAG configuration from environment."""
         return RagConfig(
             enabled=cls._get_env_bool("LATTICE_USE_RAG", True),
             min_score=cls._get_env_float("LATTICE_RAG_MIN_SCORE", 0.15),
@@ -228,7 +221,6 @@ class ConfigurationFactory:
     
     @classmethod
     def create_execution_config(cls) -> ExecutionConfig:
-        """Create execution configuration from environment."""
         web_search_mode = cls._get_env("LATTICE_WEB_SEARCH", DEFAULT_WEB_SEARCH_MODE).lower()
         web_search_enabled = False
 
@@ -236,7 +228,12 @@ class ConfigurationFactory:
             web_search_enabled = True
         elif web_search_mode == "auto":
             router_order = cls._parse_provider_order("LATTICE_ROUTER_PROVIDER_ORDER", DEFAULT_ROUTER_PROVIDER_ORDER)
-            web_search_enabled = ("groq" in router_order) or bool(cls._get_env("LATTICE_WEB_SEARCH_ADAPTER_URL"))
+            adapter_any = (
+                bool(cls._get_env("LATTICE_WEB_SEARCH_ADAPTER_URL")) or
+                bool(cls._get_env("LATTICE_WEB_SEARCH_ADAPTER_SEARCH_BASE_URL")) or
+                cls._get_env_bool("LATTICE_WEB_SEARCH_ADAPTER_ENABLED", False)
+            )
+            web_search_enabled = ("groq" in router_order) or adapter_any
             
         return ExecutionConfig(
             mode=cls._get_env("LATTICE_MODE", DEFAULT_EXECUTION_MODE),
@@ -245,10 +242,38 @@ class ConfigurationFactory:
             web_search_enabled=web_search_enabled,
             web_search_mode=web_search_mode
         )
+
+    @classmethod
+    def create_websearch_adapter_config(cls) -> Optional[Dict[str, Any]]:
+        enabled_flag = cls._get_env("LATTICE_WEB_SEARCH_ADAPTER_ENABLED", "").lower()
+
+        legacy_url = cls._get_env("LATTICE_WEB_SEARCH_ADAPTER_URL")
+        search_base_url = cls._get_env("LATTICE_WEB_SEARCH_ADAPTER_SEARCH_BASE_URL", legacy_url or "")
+        if not enabled_flag and not search_base_url:
+
+            return None
+        enabled = enabled_flag in ("1", "true", "on", "yes") or bool(search_base_url)
+        if not enabled:
+            return None
+        out: Dict[str, Any] = {
+            "enabled": True,
+            "search_type": "searxng",
+            "search_base_url": search_base_url.rstrip("/"),
+            "default_engines": cls._get_env("LATTICE_WEB_SEARCH_ADAPTER_DEFAULT_ENGINES", ""),
+            "language": cls._get_env("LATTICE_WEB_SEARCH_ADAPTER_LANGUAGE", "en"),
+            "time_range": cls._get_env("LATTICE_WEB_SEARCH_ADAPTER_TIME_RANGE", "month"),
+            "fetch_type": cls._get_env("LATTICE_WEB_SEARCH_ADAPTER_FETCH_TYPE", "trafilatura"),
+            "firecrawl_base_url": cls._get_env("LATTICE_WEB_SEARCH_ADAPTER_FIRECRAWL_BASE_URL", "").rstrip("/"),
+            "firecrawl_api_key": cls._get_env("LATTICE_WEB_SEARCH_ADAPTER_FIRECRAWL_API_KEY", None),
+            "k": cls._get_env_int("LATTICE_WEB_SEARCH_ADAPTER_K", 5),
+            "cache_dir": cls._get_env("LATTICE_WEB_SEARCH_ADAPTER_CACHE_DIR", ""),
+            "respect_robots_txt": cls._get_env_bool("LATTICE_WEB_SEARCH_ADAPTER_RESPECT_ROBOTS", True),
+            "denylist_domains": [d.strip() for d in (cls._get_env("LATTICE_WEB_SEARCH_ADAPTER_DENYLIST_DOMAINS", "").split(",")) if d.strip()],
+        }
+        return out
     
     @classmethod
     def _parse_provider_order(cls, env_key: str, default: List[str]) -> List[str]:
-        """Parse provider order from environment variable."""
         env_value = cls._get_env(env_key)
         if env_value:
             return [p.strip() for p in env_value.split(",") if p.strip()]
@@ -261,7 +286,6 @@ class ConfigurationFactory:
     
     @classmethod
     def _resolve_provider_orders(cls, providers: Dict[str, ProviderConfig]) -> tuple[List[str], List[str]]:
-        """Resolve router and agent provider orders with environment overrides."""
         router_order = cls._parse_provider_order("LATTICE_ROUTER_PROVIDER_ORDER", DEFAULT_ROUTER_PROVIDER_ORDER)
         agent_order = cls._parse_provider_order("LATTICE_AGENT_PROVIDER_ORDER", DEFAULT_AGENT_PROVIDER_ORDER)
         
@@ -282,7 +306,6 @@ class ConfigurationFactory:
 
     @classmethod
     def create_run_config(cls, run_id: str, prompt: str = "") -> RunConfig:
-        """Create complete run configuration."""
         providers = cls.create_provider_configs()
         router_order, agent_order = cls._resolve_provider_orders(providers)
         
@@ -299,7 +322,7 @@ class ConfigurationFactory:
         if not agent_model_default and agent_order:
             agent_model_default = DEFAULT_MODEL_BY_PROVIDER.get(agent_order[0])
         
-        return RunConfig(
+        rc = RunConfig(
             run_id=run_id,
             providers=providers,
             router_provider_order=router_order,
@@ -310,6 +333,9 @@ class ConfigurationFactory:
             rag=cls.create_rag_config(),
             execution=cls.create_execution_config()
         )
+
+        rc.websearch_adapter = cls.create_websearch_adapter_config()
+        return rc
 
 
 def load_run_config(run_id: str, prompt: str = "") -> RunConfig:

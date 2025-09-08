@@ -787,6 +787,8 @@ class RouterRunner:
                             "top_k": {"type": "integer", "minimum": 1, "maximum": 10},
                             "time_range": {"type": ["string", "null"], "enum": ["d", "w", "m", "y", None]},
                             "engines": {"type": ["string", "null"]},
+                            "language": {"type": ["string", "null"]},
+                            "pageno": {"type": ["integer", "null"], "minimum": 1},
                         },
                         "required": ["query", "top_k"],
                     },
@@ -881,22 +883,244 @@ class RouterRunner:
             "tools": tool_manifest,
         }
 
-    def _web_search_exec(self, query: str, top_k: int, time_range: Optional[str], engines: Optional[str]) -> Dict[str, Any]:
+    def _web_search_exec(self, query: str, top_k: int, time_range: Optional[str], engines: Optional[str], language: Optional[str], pageno: Optional[int]) -> Dict[str, Any]:
+        assert self.cfg is not None
         if not getattr(self.cfg, "web_search_enabled", False):
             return {"error": "tool_unavailable", "note": "web_search disabled by config"}
+
+
+        from datetime import datetime, timezone
+        def _now_iso() -> str:
+            return datetime.now(timezone.utc).isoformat()
+
+
+        def _map_time_range(tr: Optional[str]) -> Optional[str]:
+            if not tr:
+                return None
+            m = {"d": "day", "w": "week", "m": "month", "y": "year"}
+            return m.get(tr, None)
+
+
         try:
-            rllm = RouterLLM(self.cfg, self.logger)
-            messages = [
-                {"role": "system", "content": "Use the browser_search tool to gather top results and extract brief summaries. Output concise markdown."},
-                {"role": "user", "content": f"Query: {query}\nTopK: {top_k}\nTimeRange: {time_range or '-'}\nEngines: {engines or '-'}"},
-            ]
-            raw_obj = rllm._call_with_tools(messages, tools=[{"type": "browser_search"}], phase="web_search", tool_choice="required")
-            text = raw_obj.get("text") or ""
-            self.logger.log("web_search", source="groq", query=query, top_k=top_k, note="response_text_captured")
-            return {"results": [], "extracts": [{"url": None, "content_md": text, "status": "ok"}], "note": "source: groq"}
-        except Exception as e:
-            self.logger.log("web_search_error", error=str(e))
-            return {"error": "tool_unavailable", "note": f"web_search error: {e}"}
+            router_primary = (self.cfg.router_provider_order[0] if self.cfg.router_provider_order else None) or None
+        except Exception:
+            router_primary = None
+        router_model = (self.cfg.router_model_default or "").strip()
+        groq_eligible_models = {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}
+        wants_groq = (router_primary == "groq") and (router_model in groq_eligible_models)
+
+
+        adapter_cfg = getattr(self.cfg, "websearch_adapter", None) or {}
+        adapter_enabled = bool(adapter_cfg.get("enabled")) and bool(adapter_cfg.get("search_base_url"))
+
+
+        if wants_groq:
+            import time as _t
+            t0 = _t.time()
+            try:
+                rllm = RouterLLM(self.cfg, self.logger)
+                sys = (
+                    "You are a web research assistant. Use the browser_search tool to find relevant sources,"
+                    " then return STRICT JSON with keys: query, source, results[], extracts[]."
+                    " Shape: {\"query\":str, \"source\":\"groq\", \"results\":[{\"title\":str,\"url\":str,\"snippet\":str,\"engine\":str,\"time?\":str}], \"extracts\":[{\"url\":str,\"content_md\":str,\"status\":200,\"fetched_at\":str}]}."
+                    " Only output JSON."
+                )
+                msg = (
+                    f"Query: {query}\nTopK: {top_k}\nTimeRange: {time_range or '-'}\n"
+                    f"Engines: {engines or '-'}\nLanguage: {language or '-'}\nPageNo: {pageno or 1}"
+                )
+                messages = [{"role": "system", "content": sys}, {"role": "user", "content": msg}]
+                raw_obj = rllm._call_with_tools(messages, tools=[{"type": "browser_search"}], phase="web_search", tool_choice="required")
+                dt_ms = int((_t.time() - t0) * 1000)
+                text = (raw_obj.get("text") or "").strip()
+                obs: Dict[str, Any]
+                try:
+                    obs = json.loads(text)
+
+                    obs["query"] = query
+                    obs["source"] = "groq"
+                    obs.setdefault("results", [])
+                    obs.setdefault("extracts", [])
+                except Exception:
+
+                    obs = {
+                        "query": query,
+                        "source": "groq",
+                        "results": [],
+                        "extracts": [
+                            {"url": "", "content_md": text, "status": 200, "fetched_at": _now_iso()}
+                        ],
+                    }
+                obs["note"] = "source: groq"
+                self.logger.log(
+                    "web_search",
+                    source="groq",
+                    query=query,
+                    params={"top_k": top_k, "time_range": time_range, "engines": engines, "language": language, "pageno": pageno or 1},
+                    results_count=len(obs.get("results", [])),
+                    urls_fetched=len(obs.get("extracts", [])),
+                    latency_ms={"llm_call_ms": dt_ms},
+                )
+                return obs
+            except Exception as e:
+
+                self.logger.log("web_search_error", source="groq", query=query, error=str(e))
+                if adapter_enabled:
+                    self.logger.log("provider_switch", from_provider="groq", to_provider="adapter", reason="groq_search_failed")
+                else:
+                    return {"error": "tool_unavailable", "note": f"web_search error: {e}"}
+
+
+        if not adapter_enabled:
+            return {"error": "tool_unavailable", "note": "adapter not enabled or configured"}
+
+        import time as _t
+        import hashlib
+        import requests
+        t_search = _t.time()
+        search_base = (adapter_cfg.get("search_base_url") or "").rstrip("/")
+        searx_params = {
+            "format": "json",
+            "q": query,
+            "language": (language or adapter_cfg.get("language") or "en"),
+        }
+        if engines:
+            searx_params["engines"] = engines
+        elif adapter_cfg.get("default_engines"):
+            searx_params["engines"] = adapter_cfg.get("default_engines")
+        tr_full = _map_time_range(time_range) or adapter_cfg.get("time_range") or None
+        if tr_full:
+            searx_params["time_range"] = tr_full
+        if pageno and pageno >= 1:
+            searx_params["pageno"] = int(pageno)
+        try:
+            resp = requests.get(f"{search_base}/search", params=searx_params, timeout=30)
+            data = resp.json() if resp.ok else {"results": []}
+        except Exception:
+            data = {"results": []}
+        search_ms = int((_t.time() - t_search) * 1000)
+        raw_results = data.get("results", []) or []
+
+        results: List[Dict[str, Any]] = []
+        for r in raw_results[: max(1, min(int(top_k or 5), 10))]:
+            try:
+                results.append(
+                    {
+                        "title": r.get("title") or "",
+                        "url": r.get("url") or r.get("link") or "",
+                        "snippet": (r.get("content") or r.get("summary") or "")[:500],
+                        "engine": r.get("engine") or r.get("source") or "",
+                        "time?": r.get("publishedDate") or r.get("published_time") or None,
+                    }
+                )
+            except Exception:
+                continue
+
+
+        fetch_type = (adapter_cfg.get("fetch_type") or "trafilatura").lower()
+        deny = set([d.lower() for d in (adapter_cfg.get("denylist_domains") or [])])
+        max_k = int(adapter_cfg.get("k") or 5)
+        urls = []
+        for it in results:
+            u = (it.get("url") or "").strip()
+            if not u:
+                continue
+            try:
+                host = u.split("//", 1)[-1].split("/", 1)[0].lower()
+            except Exception:
+                host = ""
+            if host and any(host.endswith(d) or host == d for d in deny):
+                continue
+            urls.append(u)
+            if len(urls) >= max_k:
+                break
+
+        cache_dir = adapter_cfg.get("cache_dir") or os.path.join(self.run_dir, "cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        extracts: List[Dict[str, Any]] = []
+        t_fetch_total = _t.time()
+        for u in urls:
+            url_hash = hashlib.sha256(u.encode("utf-8")).hexdigest()
+            cache_path = os.path.join(cache_dir, f"{url_hash}.md")
+            cached = False
+            content_md = ""
+            status = 0
+            start = _t.time()
+            if os.path.exists(cache_path):
+                try:
+                    with open(cache_path, "r", encoding="utf-8", errors="ignore") as f:
+                        content_md = f.read()
+                    cached = True
+                    status = 200
+                except Exception:
+                    cached = False
+            if not cached:
+                if fetch_type == "firecrawl" and adapter_cfg.get("firecrawl_base_url"):
+                    fc_base = adapter_cfg.get("firecrawl_base_url").rstrip("/")
+                    url_fc = f"{fc_base}/scrape" if fc_base.endswith("/v1") else f"{fc_base}/v1/scrape"
+                    headers = {"Content-Type": "application/json"}
+                    if adapter_cfg.get("firecrawl_api_key"):
+                        headers["Authorization"] = f"Bearer {adapter_cfg['firecrawl_api_key']}"
+                    try:
+                        r = requests.post(url_fc, headers=headers, json={"url": u, "formats": ["markdown", "html"]}, timeout=45)
+                        jd = r.json() if r.ok else {}
+
+                        content_md = jd.get("markdown") or (jd.get("data", {}) or {}).get("markdown") or ""
+                        status = r.status_code
+                    except Exception:
+                        content_md = ""
+                        status = 502
+                else:
+                    try:
+                        import trafilatura
+                        downloaded = trafilatura.fetch_url(u)
+                        if downloaded is None:
+                            status = 404
+                            content_md = ""
+                        else:
+                            extracted = trafilatura.extract(downloaded, include_comments=False, include_tables=False)
+                            content_md = extracted or ""
+                            status = 200 if content_md else 204
+                    except Exception:
+                        content_md = ""
+                        status = 503
+
+                try:
+                    if content_md:
+                        with open(cache_path, "w", encoding="utf-8") as f:
+                            f.write(content_md)
+                except Exception:
+                    pass
+            dur_ms = int((_t.time() - start) * 1000)
+            self.logger.log(
+                "adapter_fetch",
+                url=u,
+                fetcher=("firecrawl" if (fetch_type == "firecrawl" and adapter_cfg.get("firecrawl_base_url")) else "trafilatura"),
+                status=status,
+                bytes=len(content_md.encode("utf-8")) if content_md else 0,
+                cached=cached,
+                duration_ms=dur_ms,
+            )
+            extracts.append({"url": u, "content_md": content_md, "status": status, "fetched_at": _now_iso()})
+        fetch_ms = int((_t.time() - t_fetch_total) * 1000)
+
+        obs = {
+            "query": query,
+            "source": "adapter",
+            "results": results,
+            "extracts": extracts,
+            "note": "source: adapter",
+        }
+        self.logger.log(
+            "web_search",
+            source="adapter",
+            query=query,
+            params={"top_k": top_k, "time_range": time_range, "engines": engines, "language": language, "pageno": pageno or 1},
+            results_count=len(results),
+            urls_fetched=len(extracts),
+            latency_ms={"searxng_ms": search_ms, "fetch_total_ms": fetch_ms},
+        )
+        return obs
 
     def _run_agentic(self, goal: str) -> Dict[str, Any]:
         try:
@@ -1226,7 +1450,9 @@ class RouterRunner:
                     k = int(tool_args.get("top_k") or 5)
                     tr = tool_args.get("time_range")
                     eng = tool_args.get("engines")
-                    obs = self._web_search_exec(q, k, tr, eng)
+                    lang = tool_args.get("language")
+                    pageno = tool_args.get("pageno")
+                    obs = self._web_search_exec(q, k, tr, eng, lang, pageno)
                 elif tool_name == "run_contract_tests":
                     tests = [str(t) for t in (tool_args.get("tests") or [])]
                     results = runner.scan_and_run()

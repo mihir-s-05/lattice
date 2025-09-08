@@ -19,10 +19,6 @@ from .constants import SUPPORTED_EXECUTION_MODES
 
 
 class SimplifiedRouter:
-    """
-    Simplified router that delegates execution to mode-specific handlers.
-    Much cleaner and more maintainable than the original 1300+ line router.
-    """
     
     def __init__(self, cwd: str, run_id: Optional[str] = None, mode: Optional[str] = None):
         self.cwd = cwd
@@ -40,7 +36,6 @@ class SimplifiedRouter:
         self.mode = self._resolve_execution_mode(mode)
         
     def _resolve_execution_mode(self, mode: Optional[str]) -> str:
-        """Resolve the execution mode from parameters and environment."""
         if mode and mode.lower() in SUPPORTED_EXECUTION_MODES:
             return mode.lower()
             
@@ -55,7 +50,6 @@ class SimplifiedRouter:
         return default_mode
         
     def run(self, goal: str) -> Dict[str, Any]:
-        """Execute the router with the given goal."""
         self.logger.log("router_start", run_id=self.run_id, mode=self.mode, goal=goal)
 
         self.cfg = load_run_config(self.run_id, goal)
@@ -118,7 +112,6 @@ class SimplifiedRouter:
             raise
     
     def _pre_ingest_rag(self):
-        """Pre-ingest repository files for RAG."""
         from .constants import RAG_INGEST_PATTERNS, DEFAULT_RAG_MAX_INGEST_FILES
         import glob
         import hashlib
@@ -142,7 +135,7 @@ class SimplifiedRouter:
         for path in unique_candidates[:max_files]:
             try:
                 with open(path, "rb") as f:
-                    raw = f.read(1024 * 1024)  # 1MB max
+                    raw = f.read(1024 * 1024)
                 digest = hashlib.sha256(raw + path.encode("utf-8")).hexdigest()
                 doc_id = digest[:16]
                 

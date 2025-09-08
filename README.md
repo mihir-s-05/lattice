@@ -316,8 +316,36 @@ Observations include applied flags, IDs, lists of artifacts, test results, faile
 
 
 Web Search & RAG
-- RAG: The host pre‑ingests selected local files (README*, docs/**, documentation.txt) into a simple TF‑IDF index. The Router and agents can query them via rag_search.
-- Web search: If the Router’s provider supports it (Groq browser_search) or a local adapter is configured, web_search is exposed. If not available, the tool returns a clean, non‑fatal error (tool_unavailable).
+- RAG: The host pre‑ingests selected local files (README*, docs/**, documentation.txt) into a simple TF‑IDF index. The Router and agents can query them via `rag_search`.
+- Web search (M5): `web_search` runs in two modes with a unified response shape.
+  - Groq Online (preferred): If Router provider is `groq` and model is `openai/gpt-oss-20b|120b`, the Router LLM uses Groq’s built‑in `browser_search` tool. The host prompts the model to return strict JSON:
+    {"query": str, "source": "groq", "results": [{"title","url","snippet","engine","time?"}], "extracts": [{"url","content_md","status","fetched_at"}]}
+  - Local Adapter (fallback): If Router provider is local (LM Studio) and adapter is enabled, `web_search` queries SearXNG (`/search?format=json`) and fetches pages with Firecrawl or Trafilatura, returning the same shape with `source:"adapter"`.
+  - If unavailable (local without adapter/MCP), the tool returns `{error:"tool_unavailable"}` non‑fatally.
+
+Adapter configuration (env):
+- `LATTICE_WEB_SEARCH=auto|on|off` (default: auto)
+- Enable adapter (any of):
+  - `LATTICE_WEB_SEARCH_ADAPTER_ENABLED=on`
+  - `LATTICE_WEB_SEARCH_ADAPTER_SEARCH_BASE_URL=http://<searxng-host>` (or legacy `LATTICE_WEB_SEARCH_ADAPTER_URL`)
+- Optional knobs:
+  - `LATTICE_WEB_SEARCH_ADAPTER_DEFAULT_ENGINES=bing,brave,wikipedia`
+  - `LATTICE_WEB_SEARCH_ADAPTER_LANGUAGE=en`
+  - `LATTICE_WEB_SEARCH_ADAPTER_TIME_RANGE=day|week|month|year`
+  - `LATTICE_WEB_SEARCH_ADAPTER_FETCH_TYPE=firecrawl|trafilatura`
+  - `LATTICE_WEB_SEARCH_ADAPTER_FIRECRAWL_BASE_URL=http://<firecrawl-host>/v1`
+  - `LATTICE_WEB_SEARCH_ADAPTER_FIRECRAWL_API_KEY=<key>`
+  - `LATTICE_WEB_SEARCH_ADAPTER_K=5` (pages to fetch)
+  - `LATTICE_WEB_SEARCH_ADAPTER_CACHE_DIR=./runs/<run_id>/cache`
+  - `LATTICE_WEB_SEARCH_ADAPTER_RESPECT_ROBOTS=on|off`
+  - `LATTICE_WEB_SEARCH_ADAPTER_DENYLIST_DOMAINS=example.com,bad.site`
+
+Tool parameters: `{ query:string, top_k:1..10, time_range?:"d|w|m|y", engines?:"csv", language?:"en", pageno?:1 }`
+
+Logging:
+- `web_search` event: `{ts, source, query, params{...}, results_count, urls_fetched, latency_ms{...}, error?}`
+- Adapter fetch logs per URL: `{url, fetcher:"firecrawl|trafilatura", status, bytes, cached, duration_ms}`
+- Provider fallback: `provider_switch` event with from/to and reason.
 
 
 Safety & Budget Guards

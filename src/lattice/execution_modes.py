@@ -29,7 +29,6 @@ from .constants import DEFAULT_STAGE_GATES
 
 
 class ExecutionMode(ABC):
-    """Base class for execution modes."""
     
     def __init__(
         self, 
@@ -66,17 +65,15 @@ class ExecutionMode(ABC):
         
     @abstractmethod
     def execute(self, goal: str, transcript: RunningTranscript) -> Dict[str, Any]:
-        """Execute the mode and return plan snapshots."""
         pass
         
     def _execute_huddle(
-        self, 
-        topic: str, 
-        questions: List[str], 
+        self,
+        topic: str,
+        questions: List[str],
         decisions_so_far: List[DecisionSummary],
         transcript: RunningTranscript
     ) -> List[DecisionSummary]:
-        """Execute a huddle and return decisions."""
         hud_obj = self.rllm.huddle(topic, questions, None)
         decisions_text = hud_obj.get("text", "")
 
@@ -109,7 +106,6 @@ class ExecutionMode(ABC):
 
 
 class LadderMode(ExecutionMode):
-    """Sequential ladder execution mode."""
 
     def execute(self, goal: str, transcript: RunningTranscript) -> Dict[str, Any]:
         plan_snapshots = []
@@ -143,14 +139,13 @@ class LadderMode(ExecutionMode):
         }
     
     def _execute_step(
-        self, 
-        step_name: str, 
-        active_agents: List, 
-        goal: str, 
+        self,
+        step_name: str,
+        active_agents: List,
+        goal: str,
         decisions: List[DecisionSummary],
         plan_snapshots: List[Dict[str, Any]]
     ):
-        """Execute a single step in the ladder."""
         plans = [a.plan(step_name, {"goal": goal, "decisions": decisions}) for a in active_agents]
         self.logger.log("router_plans", mode="ladder", step=step_name, plans=[asdict(p) for p in plans])
 
@@ -178,7 +173,6 @@ class LadderMode(ExecutionMode):
         })
     
     def _get_gates_for_step(self, step_name: str) -> List[StageGate]:
-        """Get relevant gates for a step."""
         gate_map = {
             "contracts": ["sg_api_contract"],
             "backend_scaffold": ["sg_api_contract", "sg_be_scaffold"],
@@ -191,7 +185,6 @@ class LadderMode(ExecutionMode):
 
 
 class TracksMode(ExecutionMode):
-    """Parallel tracks execution mode."""
     
     def execute(self, goal: str, transcript: RunningTranscript) -> Dict[str, Any]:
         plan_snapshots = []
@@ -232,7 +225,6 @@ class TracksMode(ExecutionMode):
 
 
 class WeaveMode(ExecutionMode):
-    """Weave execution mode with mixed approaches."""
     
     def execute(self, goal: str, transcript: RunningTranscript) -> Dict[str, Any]:
         plan_snapshots = []
@@ -301,18 +293,16 @@ class WeaveMode(ExecutionMode):
 
 
 class ExecutionModeFactory:
-    """Factory for creating execution mode handlers."""
     
     @staticmethod
     def create(
-        mode: str, 
-        run_dir: str, 
-        logger: RunLogger, 
-        artifacts: ArtifactStore, 
+        mode: str,
+        run_dir: str,
+        logger: RunLogger,
+        artifacts: ArtifactStore,
         rag: RagIndex,
         cfg: RunConfig
     ) -> ExecutionMode:
-        """Create an execution mode handler."""
         mode = mode.lower().strip()
         
         if mode == "ladder":
