@@ -295,12 +295,30 @@ def _normalize_sources(sources: Optional[List[Dict[str, Any]]]) -> List[Dict[str
     if not sources:
         return out
     seen_keys: set = set()
+    def _looks_like_url(txt: str) -> bool:
+        try:
+            s = (txt or "").strip().lower()
+            return s.startswith("http://") or s.startswith("https://")
+        except Exception:
+            return False
     for s in sources:
+        if isinstance(s, str):
+            if _looks_like_url(s):
+                s = {"type": "external", "url": s.strip()}
+            else:
+                s = {"description": s}
         if not isinstance(s, dict):
             continue
         t = s.get("type")
+        if not t and _looks_like_url(str(s.get("url"))):
+            t = "external"
+            s = {**s, "type": "external"}
         if t == "external":
             url = (s.get("url") or "").strip()
+            if not url:
+                ttl = (s.get("title") or "").strip()
+                if _looks_like_url(ttl):
+                    url = ttl
             if not url:
                 continue
             title = s.get("title") or None
@@ -337,7 +355,12 @@ def _normalize_sources(sources: Optional[List[Dict[str, Any]]]) -> List[Dict[str
                 item["hash"] = h
             out.append(item)
         else:
-            continue
+            url_guess = (s.get("url") or "").strip()
+            if _looks_like_url(url_guess):
+                key = ("external", url_guess)
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    out.append({"type": "external", "url": url_guess, **({"title": s.get("title")} if s.get("title") else {})})
     return out
 
 

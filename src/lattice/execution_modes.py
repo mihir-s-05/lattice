@@ -53,7 +53,27 @@ class ExecutionMode(ABC):
 
         self.runner = ContractRunner(run_dir, logger)
         self.evaluator = GateEvaluator(run_dir, artifacts, logger)
-        self.rllm = RouterLLM(cfg, logger)
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "Perform a web search via Groq browser_search or a local adapter.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "top_k": {"type": "integer", "minimum": 1, "maximum": 10},
+                        "time_range": {"type": ["string", "null"], "enum": ["d", "w", "m", "y", None]},
+                        "engines": {"type": ["string", "null"]},
+                        "language": {"type": ["string", "null"]},
+                        "pageno": {"type": ["integer", "null"], "minimum": 1},
+                    },
+                    "required": ["query", "top_k"],
+                },
+            },
+        }] if cfg.web_search_enabled else []
+
+        self.rllm = RouterLLM(cfg, logger, tools=tools)
 
         self.gates = [
             StageGate(

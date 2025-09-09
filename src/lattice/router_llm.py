@@ -10,9 +10,10 @@ from .runlog import RunLogger
 
 
 class RouterLLM:
-    def __init__(self, cfg: RunConfig, logger: RunLogger) -> None:
+    def __init__(self, cfg: RunConfig, logger: RunLogger, tools: Optional[List[Dict[str, Any]]] = None) -> None:
         self.cfg = cfg
         self.logger = logger
+        self.tools = tools
 
     def _call(self, messages: List[Dict[str, str]], phase: str) -> Dict[str, Any]:
         order = self.cfg.router_provider_order
@@ -170,6 +171,7 @@ class RouterLLM:
             " Requirements:"
             " - options: array (objects or strings). If objects, include id and description."
             " - sources: array with at least 3 external entries, each {type:'external',url:'<url>',title:'<title>'}."
+            " Use web_search tool if available to find relevant sources."
             " Output only JSON (array or one object)."
         )
         lines = [f"Huddle Topic: {topic}"]
@@ -179,7 +181,11 @@ class RouterLLM:
         if proposed_contract:
             lines.append("Proposed contract excerpt:\n" + proposed_contract[:3000])
         messages = [{"role": "system", "content": sys}, {"role": "user", "content": "\n".join(lines)}]
-        return self._call(messages, phase="huddle")
+
+        if self.tools and self.cfg.web_search_enabled:
+            return self._call_with_tools(messages, tools=self.tools, phase="huddle")
+        else:
+            return self._call(messages, phase="huddle")
 
     def inject(self, decision_summaries_text: str) -> Dict[str, Any]:
         sys = (

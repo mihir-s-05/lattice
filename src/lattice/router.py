@@ -93,7 +93,7 @@ class RouterRunner:
         self.logger.log("huddle_open", id=hud_id, topic=topic, requester="router", attendees=attendees, mode=self.cfg.huddles_mode)
         transcript.add_meeting(topic=topic, attendees=attendees, questions=questions or [])
 
-        rllm = RouterLLM(self.cfg, self.logger)
+        rllm = RouterLLM(self.cfg, self.logger, tools=self._build_tools_manifest())
         prov = None
         model = None
         message_events: List[Dict[str, str]] = []
@@ -325,7 +325,7 @@ class RouterRunner:
         transcript = RunningTranscript(self.run_id)
         kbus = KnowledgeBus(self.run_dir, self.logger)
 
-        rllm = RouterLLM(self.cfg, self.logger)
+        rllm = RouterLLM(self.cfg, self.logger, tools=self._build_tools_manifest())
         fe = FrontendAgent("frontend", self.cfg, self.logger, self.artifacts, self.rag)
         be = BackendAgent("backend", self.cfg, self.logger, self.artifacts, self.rag)
         llm = LLMApiAgent("llmapi", self.cfg, self.logger, self.artifacts, self.rag)
@@ -795,26 +795,25 @@ class RouterRunner:
                 "required": ["query", "top_k"],
             },
         ))
-        if getattr(self.cfg, "web_search_enabled", False):
-            tools.append({
-                "type": "function",
-                "function": {
-                    "name": "web_search",
-                    "description": "Perform a web search via Groq browser_search or a local adapter.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {"type": "string"},
-                            "top_k": {"type": "integer", "minimum": 1, "maximum": 10},
-                            "time_range": {"type": ["string", "null"], "enum": ["d", "w", "m", "y", None]},
-                            "engines": {"type": ["string", "null"]},
-                            "language": {"type": ["string", "null"]},
-                            "pageno": {"type": ["integer", "null"], "minimum": 1},
-                        },
-                        "required": ["query", "top_k"],
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "Perform a web search via Groq browser_search or a local adapter.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "top_k": {"type": "integer", "minimum": 1, "maximum": 10},
+                        "time_range": {"type": ["string", "null"], "enum": ["d", "w", "m", "y", None]},
+                        "engines": {"type": ["string", "null"]},
+                        "language": {"type": ["string", "null"]},
+                        "pageno": {"type": ["integer", "null"], "minimum": 1},
                     },
+                    "required": ["query", "top_k"],
                 },
-            })
+            },
+        })
         tools.append(fn(
             "run_contract_tests",
             "Run selected contract tests by id and return structured results.",
@@ -931,7 +930,7 @@ class RouterRunner:
                 provider="lmstudio",
                 router_mode="local",
                 config={"adapter_enabled": False, "mcp": False},
-                reason="web_search disabled by config",
+                reason="disabled_by_config",
             )
             self.logger.log(
                 "web_search",
@@ -941,9 +940,9 @@ class RouterRunner:
                 results_count=0,
                 urls_fetched=0,
                 latency_ms=None,
-                error="web_search disabled by config",
+                error="tool_unavailable",
             )
-            return {"error": "tool_unavailable", "reason": "web_search disabled (config)"}
+            return {"error": "tool_unavailable", "reason": "disabled_by_config"}
 
 
         from datetime import datetime, timezone
@@ -975,7 +974,7 @@ class RouterRunner:
             import time as _t
             t0 = _t.time()
             try:
-                rllm = RouterLLM(self.cfg, self.logger)
+                rllm = RouterLLM(self.cfg, self.logger, tools=self._build_tools_manifest())
                 sys = (
                     "You are a web research assistant. Use the browser_search tool to find relevant sources,"
                     " then return STRICT JSON with keys: query, source, results[], extracts[]."
@@ -1053,9 +1052,9 @@ class RouterRunner:
                 results_count=0,
                 urls_fetched=0,
                 latency_ms=None,
-                error="adapter not enabled",
+                error="adapter_not_enabled",
             )
-            return {"error": "tool_unavailable", "reason": "web_search disabled (no adapter/MCP configured)"}
+            return {"error": "tool_unavailable", "reason": "adapter_not_enabled"}
 
         import time as _t
         import hashlib
@@ -1215,7 +1214,7 @@ class RouterRunner:
 
         transcript = RunningTranscript(self.run_id)
         kbus = KnowledgeBus(self.run_dir, self.logger)
-        rllm = RouterLLM(self.cfg, self.logger)
+        rllm = RouterLLM(self.cfg, self.logger, tools=self._build_tools_manifest())
 
         plan_graph = PlanGraph()
         plan_graph.mode_by_segment = {"main": self.mode}

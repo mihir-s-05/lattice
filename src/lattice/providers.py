@@ -81,10 +81,13 @@ class OpenAICompatProvider:
                 "model": model_to_use,
                 "messages": messages,
                 "temperature": gptoss_temp,
-                "top_k": gptoss_top_k,
-                "min_p": gptoss_min_p,
                 "top_p": gptoss_top_p,
             }
+
+            # Only add top_k and min_p if the provider supports them (not Groq)
+            if "groq.com" not in self.cfg.base_url:
+                body["top_k"] = gptoss_top_k
+                body["min_p"] = gptoss_min_p
         else:
             body: Dict[str, Any] = {
                 "model": model_to_use,

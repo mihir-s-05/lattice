@@ -80,7 +80,16 @@ def _write_decision_log_and_citations(run_dir: str, decisions: List[DecisionSumm
     log_abs = os.path.join(run_dir, log_rel)
     lines: List[str] = ["# Decision Log", ""]
     cite_index: Dict[str, List[Dict[str, Any]]] = {}
+    try:
+        from .huddle import _normalize_sources  # local import to avoid cycles
+    except Exception:
+        _normalize_sources = lambda x: (x or [])
     for d in decisions:
+        try:
+            d.sources = _normalize_sources(getattr(d, "sources", None))
+        except Exception:
+            pass
+        
         lines.append(f"## {d.topic} ({d.id})")
         if d.decision:
             lines.append(f"Decision: {d.decision}")
