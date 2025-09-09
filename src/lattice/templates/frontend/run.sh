@@ -1,4 +1,3 @@
-#!/usr/bin/env sh
 set -eu
 PORT=${PORT:-5173}
 cd "$(dirname "$0")"/app

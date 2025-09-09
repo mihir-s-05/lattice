@@ -1,378 +1,599 @@
-LATTICE — Router Action Loop with Tools, Weave Mode, Provenance, and Finalization (M4.5)
-
-LATTICE is a CLI‑only, single‑process orchestration runtime. It coordinates multiple agents via a deterministic Router, runs contract tests and stage gates, captures provenance, supports mid‑flight replanning, and emits a rigorous finalization report and deliverables.
-
-Highlights (Milestone 4.5)
-- LLM‑driven Router action loop: the Router LLM chooses modes, opens huddles, records DecisionSummaries, spawns/schedules sub‑agents, runs RAG/web search (if available), executes contract tests, and finalizes.
-- Router Tools exposed as function calls: set_mode, open_huddle, record_decision_summary, inject_summary, spawn_agents, schedule_slice, rag_search, web_search (Groq or adapter), run_contract_tests, propose_advance_step, write_artifact, read_artifact, finalize_run.
-- Host‑enforced safety: stage gates are authoritative (advance only via propose_advance_step), artifacts/logs persisted immutably under artifacts/, summaries injected compactly, and all actions/observations are logged.
-- Weave mode retained: Hybrid critical path + docs track, and mid‑flight replanning via knowledge signals and huddles.
-- Provenance & citations retained from M4 and consolidated during finalization.
-
-
-Getting Started
-
-- Requirements: Python 3.9+, `requests` (installed via setup), provider credentials if using remote models.
-- Install:
-  - pip: `pip install -e .`
-  - or module: run via `python -m src.lattice.cli ...` from repo root.
-
-CLI Commands
-
-- lattice run "<goal>"
-  - Default: Router runs the LLM‑driven action loop (M4.5). The LLM selects a mode (often weave for README/docs), spawns agents, schedules slices, opens huddles and records DecisionSummaries, queries RAG/web, requests gate advances, and calls finalize_run.
-  - Emits `runs/<run_id>/artifacts/*`, structured logs `run.jsonl`, PlanGraph snapshot, DecisionSummaries, knowledge journal, and a finalization report with a deliverables zip.
-
-- lattice logs <run_id> [--follow] [--output-only|-O]
-  - Prints the JSONL log or formatted model outputs.
-
-- lattice scrub [<run_id>]
-  - Redacts secrets from `config.json` and `run.jsonl` for the run or for all runs.
-
-
-Providers & Environment
-
-- Default provider order
-  - Router: Groq → LM Studio fallback
-  - Agents: Gemini (OpenAI‑compatible surface) → LM Studio fallback
-
-- Credentials
-  - Router: `export GROQ_API_KEY=...`
-  - Agents: `export GEMINI_API_KEY=...`
-
-- Optional overrides
-  - Force provider: `LATTICE_PROVIDER=groq` (applies to router+agents), or `LATTICE_ROUTER_PROVIDER`, `LATTICE_AGENT_PROVIDER`
-  - Provider order: `LATTICE_ROUTER_PROVIDER_ORDER=groq,lmstudio`, `LATTICE_AGENT_PROVIDER_ORDER=gemini-openai-compat,lmstudio`
-  - Default model (first provider): `LATTICE_ROUTER_MODEL`, `LATTICE_AGENT_MODEL`
-  - Temperature/tokens: `LATTICE_TEMPERATURE`, `LATTICE_MAX_TOKENS`
-  - Huddles mode: `LATTICE_HUDDLES=dialog|synthesis`
-  - Initial mode: `LATTICE_MODE=ladder|tracks|weave`
-  - Router policy (M4 compatibility): `LATTICE_ROUTER_POLICY=llm|policy` (default: `llm`). Set `policy` to revert to deterministic M4 router.
-  - Router action budget: `LATTICE_ROUTER_MAX_STEPS=32`
-  - Web search tool exposure (Router): `LATTICE_WEB_SEARCH=auto|on|off` (default: auto; enabled when Groq is in the Router chain or an adapter URL is set). Optional adapter: `LATTICE_WEB_SEARCH_ADAPTER_URL=...`
-
-
-Key Concepts
-
-- Router modes & action loop
-  - Ladder: strictly ordered critical path.
-  - Tracks: parallel slices across agents.
-  - Weave (M4): Ladder on the critical path, with a Docs/README track in parallel. A minimal PlanGraph is saved to `artifacts/plans/plan_graph.json` with nodes, edges, segment modes, and `reasons[]` (switch/replan causes).
-  - Router LLM (M4.5): Operates an agentic loop. Each LLM turn issues exactly one tool call; the host executes it and returns an observation. The loop ends when the LLM calls `finalize_run` or the safety budget is reached.
-
-- Router Tools (LLM‑visible)
-  - set_mode, open_huddle, record_decision_summary, inject_summary, spawn_agents, schedule_slice, rag_search, web_search (Groq/browser_search or adapter), run_contract_tests, propose_advance_step, write_artifact, read_artifact, finalize_run.
-  - Stage gates are authoritative: use `propose_advance_step` to move forward. The host evaluates gates and blocks when failing.
-
-- Huddles → DecisionSummaries
-  - The Router convenes agents. A Router LLM synthesizes 1–3 DecisionSummary JSON objects with topic, options, decision, rationale, risks, actions, contracts, links.
-  - M4 extends DecisionSummary with optional `sources[]` (provenance) capturing `EvidenceRef` (artifact|rag_doc).
-
-- Stage Gates & Contract Tests
-  - Gates are boolean expressions such as `tests.pass('api_contract') and artifact.exists('backend/**')`.
-  - Evaluations log `gate_eval` with `checked_conditions[]` and `evidence[]` (artifact/RAG provenance supporting pass/fail).
-  - Contract tests are stored under `artifacts/contracts/tests/*.json`; results under `artifacts/contracts/results/*.json`.
-
-- Knowledge Signal (no network)
-  - Simulate “new info arrived” with a local drop‑in file under `artifacts/knowledge/*.json`:
-    `{ "source":"artifact|rag_doc", "refs": [ { "type":"artifact", "id":"artifacts/...", "hash":"sha256:..." } ] }`
-  - The Router ingests these, logs `knowledge_signal`, opens a huddle, and replans. In M4, such references may be attached to downstream DecisionSummaries’ `sources[]`.
-
-- Finalization Pass
-  - Emits `artifacts/finalization/report.json` with:
-    - `linters`: placeholder entries (M4 no linters configured)
-    - `tests`: parsed contract test results
-    - `drift`: `contract_drift|spec_drift|evidence_drift` (compares current artifact hashes vs earlier EvidenceRef hashes)
-    - `deliverables`: `artifacts/deliverables/deliverables.zip`
-    - `decision_log_path`: `artifacts/decisions/decision_log.md`
-    - `citation_index_path`: `artifacts/citations/index.json` (maps `ds_id → EvidenceRef[]`)
-
-
-Example Workflow
-
-1) Run a small CLI app with README
-   - `lattice run "ship a small CLI + README"`
-   - The Router LLM usually selects weave, spawns agents, schedules slices, opens a huddle to pin API and records DecisionSummaries (with citations), runs contract tests, requests gate advances, and calls finalize_run.
-
-2) Simulate a knowledge update (optional)
-   - Write a drop‑in under `runs/<run_id>/artifacts/knowledge/new_info.json` with `source` and `refs[]`.
-   - Router logs `knowledge_signal`, opens a huddle, and replans (may remain in Weave or switch).
-
-3) Inspect outputs
-   - Scaffolds: `artifacts/backend/*`, `artifacts/frontend/*`
-   - Contracts & tests: `artifacts/contracts/*`
-   - Huddles & decisions: `artifacts/huddles/*`, `artifacts/decisions/*`
-   - PlanGraph & snapshots: `artifacts/plans/*`
-   - Knowledge journal: `artifacts/knowledge/*`
-   - Finalization: `artifacts/finalization/report.json`, `artifacts/decisions/decision_log.md`, `artifacts/citations/index.json`, and `artifacts/deliverables/deliverables.zip`
-
-4) Logs & scrubbing
-   - `lattice logs <run_id> --output-only`
-   - `lattice scrub <run_id>` or `lattice scrub` (all runs)
-
-
-Provenance & Citations (M4 plumbing)
-
-- EvidenceRef union:
-  - Artifact: `{ "type":"artifact", "id":"artifacts/...", "hash":"sha256:..." }`
-  - RAG doc: `{ "type":"rag_doc", "id":"doc-id", "score":0.42, "hash?":"..." }`
-  - External (reserved for M5)
-- Finalization emits a Decision Log with inline citations and a machine‑readable Citation Index.
-
-
-Troubleshooting
-
-- Router/agent model calls require providers. If you don’t have API keys or a local LM Studio server, `run` may fail. You can still use `logs` and `scrub` on existing runs.
-- If you see timeouts from your primary provider, LATTICE falls back per configured order.
-
-
-Development Map (selected files)
-
-- `src/lattice/router.py` — RouterRunner (modes, huddles, knowledge signals, finalization)
-- `src/lattice/agents.py` — Frontend/Backend/LLM/Test agents
-- `src/lattice/stage_gates.py` — Stage gates + evaluator with provenance
-- `src/lattice/huddle.py` — DecisionSummary model (with `sources[]`) + parser/saver
-- `src/lattice/plan.py` — PlanGraph (nodes/edges/modes/reasons)
-- `src/lattice/knowledge.py` — KnowledgeBus (drop‑in ingestion + logging)
-- `src/lattice/provenance.py` — EvidenceRef types + helpers
-- `src/lattice/finalize.py` — Finalization pass (drift, decision log, citations, zip)
-- `src/lattice/cli.py` — CLI entry (run/logs/scrub)
-LATTICE — LLM‑Driven Router Orchestrator (M4.5)
-
-LATTICE is a CLI‑only, single‑process orchestration runtime. It coordinates multiple sub‑agents (Backend, Frontend, LLM API, and Tests) and uses a Router LLM to plan and act via a structured tool interface. The host runtime enforces stage gates, persists all artifacts and logs, injects DecisionSummaries, and produces a final deliverables bundle with a decision log and citations.
-
-
-Contents
-- Overview
-- Key Features
-- How It Works
-- Requirements
-- Installation
-- Quick Start
-- Configuration (Environment Variables)
-- Providers
-- Artifacts & Logs
-- Stage Gates & Contract Tests
-- Huddles & DecisionSummaries
-- Router Tools (Function Calls)
-- Web Search & RAG
-- Safety & Budget Guards
-- Troubleshooting
-- Development Map
-
-
-Overview
-LATTICE runs a goal‑oriented “agentic loop” in which a Router LLM chooses one action (tool call) per turn. The host executes the tool deterministically, returns an observation, and logs everything. The loop ends when the Router calls finalize_run, or a safety budget is reached. Sub‑agents generate scaffolds and tests; stage gates decide when it is safe to advance. All outputs, logs, decisions, and citations are saved under runs/<run_id>/.
-
-
-Key Features
-- LLM‑driven Router loop with one tool call per turn (no hidden side‑effects).
-- Tooling for mode/multitrack planning, huddles, decision recording and injection, agent scheduling, RAG/web search, contract tests, artifact I/O, gate advancement, and finalization.
-- Host‑enforced invariants: stage gates are authoritative, artifacts are sandboxed, logs are immutable.
-- Provenance and citations: DecisionSummaries can carry EvidenceRef entries; finalization builds a Decision Log and a machine‑readable Citation Index.
-- Deliverables zip with generated scaffolds and docs.
-
-
-How It Works
-1) The Router LLM receives a condensed run state (PlanGraph snapshot, active gates/tests, any unread huddle requests, recent DecisionSummaries, and the tool manifest).
-2) The Router LLM issues exactly one action by calling a tool. The host executes it and returns an observation.
-3) The loop continues until the Router calls finalize_run or reaches the safety budget.
-4) The host enforces stage gates via propose_advance_step and runs finalization (tests summary, drift, deliverables, decision log, citations).
-
-Execution modes are Ladder, Tracks, or Weave. By default, the Router runs Weave (hybrid): a critical path plus a lightweight docs track. The Router may explicitly switch modes via set_mode.
-
-
-Requirements
-- Python 3.9+
-- Network access for remote providers (optional; you can use a local OpenAI‑compatible server)
-- pip installable dependencies (requests)
-
-
-Installation
-- Editable install: pip install -e .
-- Or run as a module: python -m src.lattice.cli <command>
-
-
-Quick Start
-1) Set provider credentials (examples):
-   - Router (Groq): export GROQ_API_KEY=...
-   - Agents (Gemini OpenAI‑compat): export GEMINI_API_KEY=...
-   - Optional local fallback (LM Studio): ensure it’s running at http://localhost:1234/v1
-
-2) Run a goal:
-   - lattice run "ship a small CLI + README"
-
-3) Inspect results:
-   - Artifacts: runs/<run_id>/artifacts/
-   - Log: runs/<run_id>/run.jsonl
-   - Summary: runs/<run_id>/artifacts/run_summary.json
-   - Finalization report: runs/<run_id>/artifacts/finalization/report.json
-   - Deliverables: runs/<run_id>/artifacts/deliverables/deliverables.zip
-
-4) Tail logs (nicely formatted model outputs):
-   - lattice logs <run_id> --output-only
-
-5) Scrub secrets from prior runs:
-   - lattice scrub [<run_id>]
-
-
-Configuration (Environment Variables)
-- Router vs Agent providers
-  - LATTICE_ROUTER_PROVIDER_ORDER (default: groq,lmstudio)
-  - LATTICE_AGENT_PROVIDER_ORDER (default: gemini-openai-compat,lmstudio)
-  - LATTICE_PROVIDER (force both), LATTICE_ROUTER_PROVIDER, LATTICE_AGENT_PROVIDER
-  - LATTICE_ROUTER_MODEL, LATTICE_AGENT_MODEL, or LATTICE_MODEL (global)
-
-- Policy & modes
-  - LATTICE_ROUTER_POLICY=llm|policy (default: llm — agentic loop; policy = deterministic M4 behavior)
-  - LATTICE_MODE=ladder|tracks|weave (default: weave)
-  - LATTICE_HUDDLES=dialog|synthesis (default: dialog)
-
-- Web search & RAG
-  - LATTICE_WEB_SEARCH=auto|on|off (default: auto; on when Groq is in Router chain or adapter URL provided)
-  - LATTICE_WEB_SEARCH_ADAPTER_URL=<url> (optional)
-  - LATTICE_USE_RAG=1|0 (default: 1)
-  - LATTICE_RAG_MIN_SCORE (default: 0.15), LATTICE_RAG_MAX_INGEST (default: 20)
-
-- Sampling & limits
-  - LATTICE_TEMPERATURE (default: 0.2)
-  - LATTICE_MAX_TOKENS (optional)
-  - LATTICE_ROUTER_MAX_STEPS (default: 32)
-
-- Provider credentials
-  - GROQ_API_KEY (Router)
-  - GEMINI_API_KEY (Agents)
-  - LMSTUDIO_API_KEY (optional; often ignored by server)
-
-
-Providers
-- Groq (OpenAI‑compatible): https://api.groq.com/openai/v1 — Router primary, includes browser_search tool.
-- Gemini (OpenAI‑compatible surface): https://generativelanguage.googleapis.com/v1beta/openai/ — Agents default.
-- LM Studio (local OpenAI‑compatible): http://localhost:1234/v1 — fallback for Router/Agents.
-
-You can mix and match via provider order and environment overrides.
-
-
-Artifacts & Logs
-All run outputs are under runs/<run_id>/:
-- artifacts/
-  - backend/ — scaffolded backend (e.g., FastAPI app)
-  - frontend/ — scaffolded frontend
-  - cli/ — minimal CLI scaffold (argparse)
-  - contracts/ — openapi.yaml, tests/, results/
-  - decisions/ — DecisionSummary JSON files and decision_log.md
-  - huddles/ — huddle record + transcript
-  - plans/ — PlanGraph snapshot (JSON)
-  - finalization/ — report.json (tests, drift, citations, deliverables)
-  - deliverables/deliverables.zip — bundle of key artifacts
-  - index.json — artifact index
-- run.jsonl — append‑only JSONL log (every model turn, tool call, gate eval)
-- config.json — sanitized run configuration
-
-
-Stage Gates & Contract Tests
-- Default stage gates (IDs):
-  - sg_api_contract: tests.pass('api_contract')
-  - sg_be_scaffold: tests.pass('api_contract') and artifact.exists('backend/**')
-  - sg_fe_scaffold: artifact.exists('frontend/**')
-  - sg_smoke: tests.pass('smoke_suite')
-
-- Contract test types:
-  - schema (OpenAPI heuristic validation)
-  - unit (file_exists and similar assertions)
-  - http (simple example validation)
-
-Results are saved under artifacts/contracts/results/*.json and are referenced in gate evidence.
-
-
-Huddles & DecisionSummaries
-- Huddles align interfaces/contracts. A Router LLM synthesizes 1–3 DecisionSummaries.
-- DecisionSummary fields: id, topic, options[], decision, rationale, risks[], actions[], contracts[], links[], sources[] (EvidenceRef).
-- EvidenceRef types supported in DS and in gate evaluations:
-  - { "type":"artifact", "id":"artifacts/...", "hash":"sha256:..." }
-  - { "type":"rag_doc", "id":"doc-id", "score":0.42, "hash?":"..." }
-- The Router injects compact DecisionSummary snippets into agent contexts to keep prompts lean.
-
-
-Router Tools (Function Calls)
-The Router LLM can call exactly one tool per turn. The host validates parameters, executes deterministically, and returns a normalized observation.
-
-Core tools exposed:
-- set_mode { target_mode: ladder|tracks|weave, reason }
-- open_huddle { topic, attendees[], agenda }
-- record_decision_summary { topic, options[], decision?, rationale?, risks[]?, actions[]?, contracts[]?, sources[]?, links[]? }
-- inject_summary { decision_id, targets[] }
-- spawn_agents { roles:[frontend|backend|llmapi|tests], reason }
-- schedule_slice { active_agents:["agent:..."], notes? }
-- rag_search { query, top_k }
-- web_search { query, top_k, time_range?, engines? }  (visible only when enabled)
-- run_contract_tests { tests:[ids] }
-- propose_advance_step { step_id, note? }  (host enforces stage gates)
-- write_artifact { path:"artifacts/...", content, mime?, tags? }
-- read_artifact { path:"artifacts/..." }
-- finalize_run { summary }
-
-Observations include applied flags, IDs, lists of artifacts, test results, failed gate evidence, and paths/hashes where applicable. Every action/observation is logged in run.jsonl.
-
-
-Web Search & RAG
-- RAG: The host pre‑ingests selected local files (README*, docs/**, documentation.txt) into a simple TF‑IDF index. The Router and agents can query them via `rag_search`.
-- Web search (M5): `web_search` runs in two modes with a unified response shape.
-  - Groq Online (preferred): If Router provider is `groq` and model is `openai/gpt-oss-20b|120b`, the Router LLM uses Groq’s built‑in `browser_search` tool. The host prompts the model to return strict JSON:
-    {"query": str, "source": "groq", "results": [{"title","url","snippet","engine","time?"}], "extracts": [{"url","content_md","status","fetched_at"}]}
-  - Local Adapter (fallback): If Router provider is local (LM Studio) and adapter is enabled, `web_search` queries SearXNG (`/search?format=json`) and fetches pages with Firecrawl or Trafilatura, returning the same shape with `source:"adapter"`.
-  - If unavailable (local without adapter/MCP), the tool returns `{error:"tool_unavailable"}` non‑fatally.
-
-Adapter configuration (env):
-- `LATTICE_WEB_SEARCH=auto|on|off` (default: auto)
-- Enable adapter (any of):
-  - `LATTICE_WEB_SEARCH_ADAPTER_ENABLED=on`
-  - `LATTICE_WEB_SEARCH_ADAPTER_SEARCH_BASE_URL=http://<searxng-host>` (or legacy `LATTICE_WEB_SEARCH_ADAPTER_URL`)
-- Optional knobs:
-  - `LATTICE_WEB_SEARCH_ADAPTER_DEFAULT_ENGINES=bing,brave,wikipedia`
-  - `LATTICE_WEB_SEARCH_ADAPTER_LANGUAGE=en`
-  - `LATTICE_WEB_SEARCH_ADAPTER_TIME_RANGE=day|week|month|year`
-  - `LATTICE_WEB_SEARCH_ADAPTER_FETCH_TYPE=firecrawl|trafilatura`
-  - `LATTICE_WEB_SEARCH_ADAPTER_FIRECRAWL_BASE_URL=http://<firecrawl-host>/v1`
-  - `LATTICE_WEB_SEARCH_ADAPTER_FIRECRAWL_API_KEY=<key>`
-  - `LATTICE_WEB_SEARCH_ADAPTER_K=5` (pages to fetch)
-  - `LATTICE_WEB_SEARCH_ADAPTER_CACHE_DIR=./runs/<run_id>/cache`
-  - `LATTICE_WEB_SEARCH_ADAPTER_RESPECT_ROBOTS=on|off`
-  - `LATTICE_WEB_SEARCH_ADAPTER_DENYLIST_DOMAINS=example.com,bad.site`
-
-Tool parameters: `{ query:string, top_k:1..10, time_range?:"d|w|m|y", engines?:"csv", language?:"en", pageno?:1 }`
-
-Logging:
-- `web_search` event: `{ts, source, query, params{...}, results_count, urls_fetched, latency_ms{...}, error?}`
-- Adapter fetch logs per URL: `{url, fetcher:"firecrawl|trafilatura", status, bytes, cached, duration_ms}`
-- Provider fallback: `provider_switch` event with from/to and reason.
-
-
-Safety & Budget Guards
-- Stage gates are authoritative — the only path forward is via propose_advance_step; the host evaluates gates and blocks on failure.
-- Artifact writes are sandboxed under artifacts/; paths outside are rejected.
-- Logs are immutable; every model turn and tool call is recorded.
-- Budget guards (host‑enforced):
-  - Max actions per slice (agent cap) — excess agents are skipped and logged.
-  - Max concurrent huddles — huddle requests above the limit return a non‑fatal error observation.
-  - Cooldown after repeated gate failures — observations include a retry suggestion.
-
-
-Troubleshooting
-- No outputs? Check run.jsonl for provider errors or missing credentials.
-- Contract tests not running? Ensure the Tests agent produced artifacts/contracts/tests/contract_tests.json.
-- Web search not available? Confirm LATTICE_WEB_SEARCH and provider setup; otherwise expect a tool_unavailable observation.
-- To inspect model outputs quickly: lattice logs <run_id> --output-only
-- To remove secrets from archived runs: lattice scrub [<run_id>]
-
-
-Development Map (Selected Files)
-- src/lattice/router.py — RouterRunner (agentic loop, tools, logging, budget guards)
-- src/lattice/router_llm.py — Router LLM calls (plain + tool‑enabled)
-- src/lattice/agents.py — Frontend/Backend/LLM/Test agents (scaffolds + tests)
-- src/lattice/stage_gates.py — Stage gates + evaluator with evidence
-- src/lattice/contracts.py — Contract test runner (schema/http/unit)
-- src/lattice/rag.py — Lightweight TF‑IDF RAG index
-- src/lattice/huddle.py — DecisionSummary model + persistence + transcript saver
-- src/lattice/finalize.py — Finalization (tests, drift, decision log, citations, deliverables)
-- src/lattice/cli.py — CLI (`run`, `logs`, `scrub`)
+# LATTICE — LLM-Driven Multi-Agent Orchestrator
+
+LATTICE is a CLI-only, single-process orchestration runtime that coordinates multiple AI agents via an intelligent Router LLM. It provides structured workflow management, contract testing, provenance tracking, web search capabilities, and comprehensive deliverables generation for software development projects.
+
+## Table of Contents
+- [Overview](#overview)
+- [Key Features](#key-features)
+- [Architecture](#architecture)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+- [Web Search Setup](#web-search-setup)
+- [CLI Commands](#cli-commands)
+- [Execution Modes](#execution-modes)
+- [Router Tools](#router-tools)
+- [Stage Gates & Contract Tests](#stage-gates--contract-tests)
+- [Huddles & Decision Making](#huddles--decision-making)
+- [Artifacts & Logs](#artifacts--logs)
+- [Provenance & Citations](#provenance--citations)
+- [Troubleshooting](#troubleshooting)
+- [Development Guide](#development-guide)
+
+## Overview
+
+LATTICE operates as a goal-oriented "agentic loop" where a Router LLM coordinates specialized agents (Backend, Frontend, LLM API, Tests) to accomplish software development tasks. The Router makes one action per turn via structured tool calls, with the host runtime enforcing safety constraints and logging all activities.
+
+**Core workflow:**
+1. Router LLM receives condensed run state and tool manifest
+2. Issues exactly one tool call per turn
+3. Host executes tool and returns structured observation
+4. Loop continues until finalization or budget exhaustion
+5. System generates comprehensive deliverables and reports
+
+## Key Features
+
+### LLM-Driven Orchestration
+- **Router LLM**: Intelligent coordinator that plans, schedules, and manages agent workflows
+- **Structured Tool Interface**: 13 core tools for mode switching, agent spawning, testing, and artifact management
+- **Safety-First Design**: Host-enforced stage gates, artifact sandboxing, and immutable logs
+
+### Multi-Agent Coordination
+- **Backend Agent**: API contracts, server scaffolding, OpenAPI specifications
+- **Frontend Agent**: UI wireframes, component schemas, web application scaffolding  
+- **LLM API Agent**: Prompt engineering, tool adapters, integration patterns
+- **Test Agent**: Contract testing, validation suites, quality assurance
+
+### Advanced Capabilities
+- **Web Search Integration**: Groq online search + local SearXNG adapter support
+- **RAG (Retrieval-Augmented Generation)**: TF-IDF indexing of project documentation
+- **Provenance Tracking**: Complete citation chains from sources to decisions
+- **Decision Management**: Structured huddles with synthesis and consensus tracking
+
+## Architecture
+
+LATTICE uses a hub-and-spoke architecture with the Router LLM as the central coordinator:
+
+```
+    ┌─────────────────┐
+    │   Router LLM    │ ← Central coordinator
+    │   (Groq/Local)  │
+    └─────────┬───────┘
+              │
+    ┌─────────┼───────┐
+    │         │       │
+┌───▼───┐ ┌──▼──┐ ┌──▼──┐ ┌───▼────┐
+│Backend│ │Frontend│ │Tests│ │LLM API │
+│Agent  │ │ Agent  │ │Agent│ │ Agent  │
+└───────┘ └────────┘ └─────┘ └────────┘
+```
+
+### Execution Modes
+- **Ladder**: Sequential, ordered execution path
+- **Tracks**: Parallel agent execution with synchronization
+- **Weave**: Hybrid critical path + documentation track (default)
+
+## Requirements
+
+- **Python**: 3.9+
+- **Dependencies**: `requests`, `trafilatura`, `fastapi`, `PyYAML`, `ulid-py` (auto-installed via pyproject.toml)
+- **Providers**: At least one of:
+  - Groq API key (recommended for Router)
+  - Gemini API key (recommended for Agents)  
+  - Local LM Studio server at `http://localhost:1234/v1`
+
+## Installation
+
+### Option 1: Editable Install
+```bash
+cd lattice
+pip install -e .
+```
+
+### Option 2: Module Execution
+```bash
+python -m src.lattice.cli <command>
+```
+
+## Quick Start
+
+### 1. Set API Credentials
+```bash
+# Router (Groq - recommended)
+export GROQ_API_KEY="gsk_..."
+
+# Agents (Gemini - recommended)  
+export GEMINI_API_KEY="AI..."
+
+# Optional: Local fallback (LM Studio)
+# Ensure LM Studio is running at http://localhost:1234/v1
+```
+
+### 2. Run Your First Project
+```bash
+lattice run "build a task management API with web frontend"
+```
+
+### 3. Monitor Progress
+```bash
+# View formatted model outputs
+lattice logs <run_id> --output-only
+
+# Follow logs in real-time
+lattice logs <run_id> --follow
+```
+
+### 4. Inspect Results
+```bash
+# Project structure created under:
+runs/<run_id>/artifacts/
+├── backend/        # FastAPI application
+├── frontend/       # Web interface  
+├── contracts/      # OpenAPI specs & tests
+├── decisions/      # Decision summaries
+└── deliverables/   # Final ZIP bundle
+```
+
+## Configuration
+
+LATTICE is configured via environment variables:
+
+### Provider Configuration
+```bash
+# Provider precedence order
+LATTICE_ROUTER_PROVIDER_ORDER="groq,lmstudio"  # Router fallback chain
+LATTICE_AGENT_PROVIDER_ORDER="gemini-openai-compat,lmstudio"  # Agent fallback
+
+# Force specific providers
+LATTICE_ROUTER_PROVIDER="groq"      # Override router provider
+LATTICE_AGENT_PROVIDER="gemini-openai-compat"   # Override agent provider
+
+# Model selection
+LATTICE_ROUTER_MODEL="openai/gpt-oss-120b"  # Router model
+LATTICE_AGENT_MODEL="gemini-2.5-flash-lite" # Agent model
+```
+
+### Execution Configuration
+```bash
+# Execution mode (default: weave)
+LATTICE_MODE="weave|ladder|tracks"
+
+# Router behavior 
+LATTICE_ROUTER_POLICY="llm"         # "llm" = agentic, "policy" = deterministic
+LATTICE_ROUTER_MAX_STEPS="32"       # Safety budget (max actions)
+
+# Huddle mode
+LATTICE_HUDDLES="dialog"            # "dialog" or "synthesis"
+
+# Model parameters
+LATTICE_TEMPERATURE="0.2"           # Sampling temperature
+LATTICE_MAX_TOKENS="4000"           # Max response tokens
+```
+
+### RAG & Search Configuration
+```bash
+# RAG settings
+LATTICE_USE_RAG="1"                 # Enable/disable RAG
+LATTICE_RAG_MIN_SCORE="0.15"        # Minimum relevance score
+LATTICE_RAG_MAX_INGEST="20"         # Max files to index
+
+# Web search
+LATTICE_WEB_SEARCH="auto"           # "auto", "on", or "off"
+```
+
+## Web Search Setup
+
+LATTICE supports two web search modes:
+
+### 1. Groq Online Search (Recommended)
+When using Groq as the Router provider with compatible models (`openai/gpt-oss-20b` or `openai/gpt-oss-120b`), web search is automatically enabled via Groq's built-in `browser_search` tool.
+
+**Setup:**
+```bash
+export GROQ_API_KEY="gsk_..."
+export LATTICE_ROUTER_PROVIDER="groq"
+export LATTICE_ROUTER_MODEL="openai/gpt-oss-120b"
+# Web search automatically available
+```
+
+### 2. Local SearXNG Adapter
+For local/offline scenarios or when using LM Studio, configure a local SearXNG instance:
+
+#### SearXNG Installation (Docker)
+```bash
+# Clone SearXNG
+git clone https://github.com/searxng/searxng-docker.git
+cd searxng-docker
+
+# Configure settings (optional - edit .env file for customization)
+# cp .env.template .env
+
+# Start SearXNG
+docker-compose up -d
+
+# SearXNG will be available at http://localhost:8080
+# Verify it's running: curl http://localhost:8080/search?format=json\&q=test
+```
+
+#### Configure LATTICE for Local Search
+```bash
+# Enable local adapter
+export LATTICE_WEB_SEARCH_ADAPTER_SEARCH_BASE_URL="http://localhost:8080"
+
+# Optional: Customize search behavior
+export LATTICE_WEB_SEARCH_ADAPTER_DEFAULT_ENGINES="bing,brave,wikipedia"
+export LATTICE_WEB_SEARCH_ADAPTER_LANGUAGE="en"
+export LATTICE_WEB_SEARCH_ADAPTER_TIME_RANGE="month"
+export LATTICE_WEB_SEARCH_ADAPTER_K="5"  # Pages to fetch per search
+
+# Content extraction method
+export LATTICE_WEB_SEARCH_ADAPTER_FETCH_TYPE="trafilatura"  # or "firecrawl"
+
+# Optional: Firecrawl integration (requires separate service)
+export LATTICE_WEB_SEARCH_ADAPTER_FIRECRAWL_BASE_URL="http://localhost:3002/v1"
+export LATTICE_WEB_SEARCH_ADAPTER_FIRECRAWL_API_KEY="your_key"
+```
+
+#### Search Adapter Configuration Options
+```bash
+# Caching and performance
+LATTICE_WEB_SEARCH_ADAPTER_CACHE_DIR="./runs/<run_id>/cache"
+LATTICE_WEB_SEARCH_ADAPTER_RESPECT_ROBOTS="on"
+
+# Content filtering  
+LATTICE_WEB_SEARCH_ADAPTER_DENYLIST_DOMAINS="example.com,bad.site"
+```
+
+## CLI Commands
+
+### `lattice run`
+Execute a goal-driven workflow:
+
+```bash
+lattice run "create a REST API for inventory management"
+
+# Options:
+--router-provider groq          # Override router provider
+--router-model openai/gpt-oss-120b  # Override router model  
+--huddles synthesis             # Huddle mode (dialog|synthesis)
+--no-websearch                  # Disable web search
+--no-rag                        # Disable RAG
+```
+
+### `lattice logs`
+Inspect run logs and outputs:
+
+```bash
+lattice logs run-20241201-143022-abc123
+
+# Options:
+--output-only, -O               # Show only model outputs (formatted)
+--follow, -f                    # Tail logs in real-time
+```
+
+### `lattice scrub`
+Remove sensitive data from logs:
+
+```bash
+lattice scrub                   # Scrub all runs
+lattice scrub run-20241201-143022-abc123  # Scrub specific run
+```
+
+## Execution Modes
+
+### Weave Mode (Default)
+Hybrid approach combining critical path execution with parallel documentation:
+- **Critical Path**: Backend → Tests → Frontend (sequential)
+- **Docs Track**: README/documentation generation (parallel)
+- **Knowledge Integration**: Automatic replanning based on new information
+
+### Ladder Mode  
+Strictly sequential execution:
+1. API contracts & tests
+2. Backend scaffold
+3. Frontend scaffold  
+4. Smoke tests & validation
+
+### Tracks Mode
+Parallel execution with synchronization:
+- All agents work simultaneously
+- Periodic synchronization points
+- Huddles for conflict resolution
+
+## Router Tools
+
+The Router LLM has access to 13 core tools for workflow orchestration:
+
+### Planning & Mode Control
+- **`set_mode`**: Switch execution mode (ladder|tracks|weave)
+- **`open_huddle`**: Convene agents for interface alignment
+- **`record_decision_summary`**: Log structured decisions with provenance
+
+### Agent Management  
+- **`spawn_agents`**: Create agent instances (frontend|backend|llmapi|tests)
+- **`schedule_slice`**: Execute parallel agent workflows
+- **`inject_summary`**: Share decision context between agents
+
+### Information Retrieval
+- **`rag_search`**: Query project documentation index
+- **`web_search`**: Search web for relevant information (when enabled)
+
+### Quality Assurance
+- **`run_contract_tests`**: Execute validation suites
+- **`propose_advance_step`**: Request stage gate progression
+
+### Artifact Management
+- **`write_artifact`**: Create project files
+- **`read_artifact`**: Access existing artifacts
+- **`finalize_run`**: Complete workflow and generate deliverables
+
+## Stage Gates & Contract Tests
+
+LATTICE enforces quality through progressive stage gates:
+
+### Default Stage Gates
+1. **sg_api_contract**: API specification validity
+2. **sg_be_scaffold**: Backend implementation presence
+3. **sg_fe_scaffold**: Frontend scaffold completion  
+4. **sg_smoke**: Integration test passage
+
+### Contract Test Types
+- **Schema**: OpenAPI specification validation
+- **Unit**: File existence and structure checks  
+- **HTTP**: Endpoint functionality verification
+
+### Gate Evaluation Process
+```bash
+# Gates are evaluated via boolean expressions:
+tests.pass('api_contract') and artifact.exists('backend/**')
+
+# Results include:
+{
+  "status": "passed|failed|blocked",
+  "evidence": [...],      # Supporting artifacts/RAG docs
+  "conditions": [...]     # Evaluated conditions
+}
+```
+
+## Huddles & Decision Making
+
+### Huddle Modes
+
+#### Dialog Mode (Default)
+Interactive multi-agent conversation:
+- Agents propose interface changes
+- Consensus tracking via `AGREE: yes|no`
+- Blocker identification and resolution
+- Router synthesis of final decisions
+
+#### Synthesis Mode
+LLM-driven decision generation:
+- Direct decision synthesis without agent dialog
+- Faster execution for clear-cut scenarios
+- Automatic provenance linking
+
+### DecisionSummary Structure
+```json
+{
+  "id": "ds_01234567890abcdef",
+  "topic": "API Authentication Strategy", 
+  "options": ["JWT", "OAuth2", "API Keys"],
+  "decision": "JWT with refresh tokens",
+  "rationale": "Balances security with implementation simplicity",
+  "risks": ["Token expiration handling", "Storage security"],
+  "actions": [
+    {"owner": "backend", "task": "Implement JWT middleware"}
+  ],
+  "contracts": [
+    {"name": "auth_contract", "schema_hash": "sha256:..."}
+  ],
+  "sources": [
+    {"type": "external", "url": "https://jwt.io/introduction/"},
+    {"type": "artifact", "id": "artifacts/contracts/openapi.yaml"}
+  ],
+  "links": [
+    {"title": "Huddle Transcript", "url": "artifacts/huddles/hud_..."}
+  ]
+}
+```
+
+## Artifacts & Logs
+
+### Directory Structure
+```
+runs/<run_id>/
+├── artifacts/
+│   ├── backend/           # FastAPI application
+│   │   ├── app/main.py    # Server implementation
+│   │   ├── requirements.txt
+│   │   └── run.sh         # Startup script
+│   ├── frontend/          # Web interface
+│   │   ├── app/
+│   │   │   ├── index.html
+│   │   │   ├── script.js
+│   │   │   └── styles.css
+│   │   └── run.sh
+│   ├── cli/               # Command-line interface
+│   │   └── main.py        # CLI implementation
+│   ├── contracts/         # API specifications
+│   │   ├── openapi.yaml   # OpenAPI 3.1 spec
+│   │   ├── tests/         # Contract tests
+│   │   └── results/       # Test results
+│   ├── decisions/         # Decision summaries
+│   ├── huddles/           # Meeting transcripts
+│   ├── plans/             # Execution plans
+│   ├── finalization/      # Final reports
+│   │   └── report.json
+│   ├── deliverables/      # Packaged outputs
+│   │   └── deliverables.zip
+│   └── README.md          # Project documentation
+├── run.jsonl              # Structured event log
+└── config.json            # Run configuration
+```
+
+### Log Events
+The `run.jsonl` file contains structured events:
+- Model calls (provider, latency, tokens)
+- Tool executions (parameters, observations)  
+- Gate evaluations (conditions, evidence)
+- Huddle activities (participants, decisions)
+- Web search queries (results, performance)
+- Provider fallbacks (reasons, timings)
+
+## Provenance & Citations
+
+LATTICE maintains complete traceability from sources to decisions:
+
+### EvidenceRef Types
+```json
+// External web sources
+{"type": "external", "url": "https://...", "title": "..."}
+
+// Project artifacts  
+{"type": "artifact", "id": "artifacts/...", "hash": "sha256:..."}
+
+// RAG documents
+{"type": "rag_doc", "id": "doc-id", "score": 0.85}
+```
+
+### Citation Pipeline
+1. **Collection**: Sources gathered during web search, RAG queries
+2. **Association**: Linked to decisions via `sources[]` field
+3. **Validation**: Hash verification for artifact drift detection
+4. **Consolidation**: Decision log with inline citations generated
+5. **Indexing**: Machine-readable citation index for tooling
+
+### Finalization Outputs
+- **Decision Log**: `artifacts/decisions/decision_log.md` - Human-readable summary
+- **Citation Index**: `artifacts/citations/index.json` - Machine-readable mappings
+- **Drift Report**: Detection of changed artifacts since decision time
+
+## Troubleshooting
+
+### Common Issues
+
+#### No Output Generated
+```bash
+# Check provider connectivity
+lattice logs <run_id> | grep "model_call"
+
+# Verify API keys
+echo $GROQ_API_KEY
+echo $GEMINI_API_KEY
+```
+
+#### Web Search Unavailable
+```bash
+# For Groq online search
+export LATTICE_ROUTER_PROVIDER="groq"
+export LATTICE_ROUTER_MODEL="openai/gpt-oss-120b"
+
+# For local SearXNG
+export LATTICE_WEB_SEARCH_ADAPTER_SEARCH_BASE_URL="http://localhost:8080"
+```
+
+#### Contract Tests Failing
+```bash
+# Ensure test definitions exist
+ls runs/<run_id>/artifacts/contracts/tests/
+
+# Check test results
+cat runs/<run_id>/artifacts/contracts/results/*.json
+```
+
+#### Provider Fallbacks
+```bash
+# Monitor fallback chain in logs
+lattice logs <run_id> | grep "provider_switch"
+```
+
+### Debug Mode
+For detailed debugging, examine the structured logs:
+```bash
+# Raw JSONL events (all system events)
+cat runs/<run_id>/run.jsonl
+
+# Formatted model outputs only (clean, readable)
+lattice logs <run_id> --output-only
+
+# Follow real-time execution (tail -f behavior)
+lattice logs <run_id> --follow
+
+# Both follow and output-only can be combined
+lattice logs <run_id> --follow --output-only
+```
+
+## Development Guide
+
+### Project Structure
+```
+src/lattice/
+├── cli.py              # Command-line interface
+├── router.py           # Main orchestration logic
+├── router_llm.py       # Router LLM integration
+├── agents.py           # Specialized agent implementations
+├── providers.py        # LLM provider abstraction
+├── contracts.py        # Contract testing framework
+├── stage_gates.py      # Progressive validation gates
+├── huddle.py           # Decision-making coordination
+├── finalize.py         # Deliverable generation
+├── rag.py              # TF-IDF retrieval system
+├── artifacts.py        # File management system
+├── provenance.py       # Citation tracking
+├── constants.py        # Configuration constants
+└── templates/          # Code generation templates
+    ├── backend/        # FastAPI templates
+    ├── frontend/       # Web app templates  
+    └── cli/            # CLI templates
+```
+
+### Key Extension Points
+
+#### Custom Agents
+```python
+from lattice.agents import BaseAgent
+
+class CustomAgent(BaseAgent):
+    def plan(self, step_or_goal: str, context: Dict[str, Any]) -> AgentPlan:
+        # Define agent planning logic
+        pass
+    
+    def act(self, inputs: Dict[str, Any]) -> List[ArtifactRef]:
+        # Implement agent actions
+        pass
+```
+
+#### Custom Contract Tests
+```python
+# Add to artifacts/contracts/tests/contract_tests.json
+{
+  "id": "custom_test",
+  "subject": "CustomValidation", 
+  "type": "custom",
+  "runner": "local",
+  "custom_checks": [...]
+}
+```
+
+#### Custom Router Tools
+Tools are defined in `router.py:_build_tools_manifest()` and implemented in `router.py:_run_agentic()`.
+
+### Architecture Principles
+
+1. **Single Responsibility**: Each agent handles specific domain concerns
+2. **Immutable Logs**: All actions logged to append-only JSONL
+3. **Structured Observations**: Tool calls return normalized JSON responses
+4. **Host Authority**: Safety constraints enforced by runtime, not LLM
+5. **Provider Agnostic**: Abstract provider interface supports multiple LLMs
+6. **Comprehensive Provenance**: Full citation chains from sources to deliverables
+
+### Contributing
+
+When modifying LATTICE:
+
+1. **Preserve Tool Interface**: Router tools maintain backward compatibility
+2. **Extend Constants**: Add new defaults to `constants.py`
+3. **Log Everything**: New actions should emit structured events
+4. **Test Contracts**: Validate changes don't break existing workflows
+5. **Update Templates**: Ensure code generation templates stay current

@@ -166,7 +166,10 @@ class RouterLLM:
     def huddle(self, topic: str, questions: List[str], proposed_contract: Optional[str]) -> Dict[str, Any]:
         sys = (
             "You are facilitating a Huddle. Return 1-3 DecisionSummary JSON objects"
-            " with fields: id (optional), topic, options[], decision, rationale, risks[], actions[], contracts[], links[]."
+            " with fields: id (optional), topic, options[], decision, rationale, risks[], actions[], contracts[], links[], sources[]."
+            " Requirements:"
+            " - options: array (objects or strings). If objects, include id and description."
+            " - sources: array with at least 3 external entries, each {type:'external',url:'<url>',title:'<title>'}."
             " Output only JSON (array or one object)."
         )
         lines = [f"Huddle Topic: {topic}"]

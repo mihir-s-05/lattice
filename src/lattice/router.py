@@ -18,7 +18,17 @@ from .agents import (
 from .artifacts import ArtifactStore
 from .config import RunConfig, load_run_config
 from .contracts import ContractRunner
-from .huddle import DecisionSummary, parse_decision_summaries, save_decisions, save_huddle, decision_injection_text
+from .huddle import (
+    DecisionSummary,
+    parse_decision_summaries,
+    save_decisions,
+    save_huddle,
+    decision_injection_text,
+    ensure_unique_ids,
+    dedupe_decisions,
+    ensure_provenance_links,
+    validate_decision_integrity,
+)
 from .ids import ulid
 from .providers import call_with_fallback, ProviderError
 from .rag import RagIndex
@@ -34,7 +44,7 @@ from .finalize import run_finalization
 
 
 class RouterRunner:
-    def __init__(self, cwd: str, run_id: Optional[str] = None, mode: Optional[str] = None) -> None:
+    def __init__(self, cwd: str, run_id: Optional[str] = None, mode: Optional[str] = None, no_websearch: bool = False) -> None:
         self.cwd = cwd
         self.run_id = run_id or gen_run_id()
         self.run_dir = os.path.join(cwd, "runs", self.run_id)
@@ -57,6 +67,8 @@ class RouterRunner:
         self._cooldown_threshold: int = 2
         self._cooldown_seconds: float = 5.0
         self._gate_failures: Dict[str, Tuple[int, float]] = {}
+        self._web_recent: List[Dict[str, Any]] = []
+        self._web_disabled_by_flag: bool = bool(no_websearch)
 
     def _huddle_topic(self, goal: str) -> str:
         g = (goal or "").strip()
@@ -108,11 +120,13 @@ class RouterRunner:
                 auto_decision=True,
                 messages=None,
             )
-            for d in decisions:
-                try:
-                    d.links = (d.links or []) + [{"title": "Huddle Transcript", "url": os.path.join(self.run_dir, t_rel)}]
-                except Exception:
-                    pass
+            try:
+                decisions = ensure_unique_ids(decisions)
+                decisions = dedupe_decisions(decisions)
+                decisions = ensure_provenance_links(decisions, default_link={"title": "Huddle Transcript", "url": os.path.join(self.run_dir, t_rel)})
+                validate_decision_integrity(decisions)
+            except Exception as e:
+                self.logger.log("decision_integrity_error", error=str(e))
             saved = save_decisions(self.run_dir, self.artifacts, self.rag, decisions)
             for d, rel in saved:
                 self.logger.log("decision_summary", decision_id=d.id, topic=d.topic, decision=d.decision, path=os.path.join(self.run_dir, rel))
@@ -329,7 +343,7 @@ class RouterRunner:
             StageGate(
                 id="sg_api_contract",
                 name="API contract passes",
-                conditions=["tests.pass('api_contract')"],
+                conditions=["tests.pass('api_contract') and tests.pass('api_consistency')"],
             ),
             StageGate(
                 id="sg_be_scaffold",
@@ -344,7 +358,7 @@ class RouterRunner:
             StageGate(
                 id="sg_smoke",
                 name="Smoke tests pass",
-                conditions=["tests.pass('smoke_suite')"],
+                conditions=["tests.pass('smoke_suite') and tests.pass('fastapi_app')"],
             ),
         ]
         evaluator = GateEvaluator(self.run_dir, self.artifacts, self.logger)
@@ -638,6 +652,13 @@ class RouterRunner:
         except Exception:
             pass
 
+        try:
+            pre_results = runner.scan_and_run()
+            pre_gate_results = evaluator.evaluate(gates)
+            self.logger.log("pre_finalization_validation", tests=[asdict(r) for r in pre_results], gates=[asdict(g) for g in pre_gate_results])
+        except Exception as e:
+            self.logger.log("pre_finalization_error", error=str(e))
+
         final_report = run_finalization(self.run_dir, self.artifacts, self.logger, decisions, evaluator)
 
         summary = self._build_summary(agents, evaluator, decisions)
@@ -885,8 +906,44 @@ class RouterRunner:
 
     def _web_search_exec(self, query: str, top_k: int, time_range: Optional[str], engines: Optional[str], language: Optional[str], pageno: Optional[int]) -> Dict[str, Any]:
         assert self.cfg is not None
+        if self._web_disabled_by_flag:
+            self.logger.log(
+                "web_search_unavailable",
+                provider="lmstudio",
+                router_mode="local",
+                config={"adapter_enabled": False, "mcp": False},
+                reason="disabled_by_flag",
+            )
+            self.logger.log(
+                "web_search",
+                source="unavailable",
+                query=query,
+                params={"top_k": top_k, "time_range": time_range, "engines": engines, "language": language, "pageno": pageno or 1},
+                results_count=0,
+                urls_fetched=0,
+                latency_ms=None,
+                error="disabled_by_flag",
+            )
+            return {"error": "tool_unavailable", "reason": "web_search disabled (disabled_by_flag)"}
         if not getattr(self.cfg, "web_search_enabled", False):
-            return {"error": "tool_unavailable", "note": "web_search disabled by config"}
+            self.logger.log(
+                "web_search_unavailable",
+                provider="lmstudio",
+                router_mode="local",
+                config={"adapter_enabled": False, "mcp": False},
+                reason="web_search disabled by config",
+            )
+            self.logger.log(
+                "web_search",
+                source="unavailable",
+                query=query,
+                params={"top_k": top_k, "time_range": time_range, "engines": engines, "language": language, "pageno": pageno or 1},
+                results_count=0,
+                urls_fetched=0,
+                latency_ms=None,
+                error="web_search disabled by config",
+            )
+            return {"error": "tool_unavailable", "reason": "web_search disabled (config)"}
 
 
         from datetime import datetime, timezone
@@ -968,11 +1025,37 @@ class RouterRunner:
                 if adapter_enabled:
                     self.logger.log("provider_switch", from_provider="groq", to_provider="adapter", reason="groq_search_failed")
                 else:
-                    return {"error": "tool_unavailable", "note": f"web_search error: {e}"}
+                    self.logger.log(
+                        "web_search",
+                        source="unavailable",
+                        query=query,
+                        params={"top_k": top_k, "time_range": time_range, "engines": engines, "language": language, "pageno": pageno or 1},
+                        results_count=0,
+                        urls_fetched=0,
+                        latency_ms=None,
+                        error=str(e),
+                    )
+                    return {"error": "tool_unavailable", "reason": f"web_search error: {e}"}
 
 
         if not adapter_enabled:
-            return {"error": "tool_unavailable", "note": "adapter not enabled or configured"}
+            self.logger.log(
+                "web_search_unavailable",
+                provider="lmstudio",
+                router_mode="local",
+                config={"adapter_enabled": False, "mcp": False},
+            )
+            self.logger.log(
+                "web_search",
+                source="unavailable",
+                query=query,
+                params={"top_k": top_k, "time_range": time_range, "engines": engines, "language": language, "pageno": pageno or 1},
+                results_count=0,
+                urls_fetched=0,
+                latency_ms=None,
+                error="adapter not enabled",
+            )
+            return {"error": "tool_unavailable", "reason": "web_search disabled (no adapter/MCP configured)"}
 
         import time as _t
         import hashlib
@@ -1312,6 +1395,40 @@ class RouterRunner:
                         except Exception:
                             rec_obj = None
                     ds = parse_decision_summaries(json.dumps(d_obj))[0]
+                    try:
+                        from .huddle import _normalize_sources  # type: ignore
+                        base_sources = _normalize_sources(ds.sources)
+                        externals = [s for s in base_sources if s.get("type") == "external"]
+                        if len(externals) < 3 and self._web_recent:
+                            picks: List[Dict[str, Any]] = []
+                            seen = set([ ("external", s.get("url")) for s in externals if s.get("url") ])
+                            for r in list(self._web_recent)[-5:]:
+                                obsr = r.get("obs") or {}
+                                for it in (obsr.get("results") or [])[:5]:
+                                    u = (it or {}).get("url")
+                                    if not u:
+                                        continue
+                                    key = ("external", u)
+                                    if key in seen:
+                                        continue
+                                    seen.add(key)
+                                    title = (it or {}).get("title") or None
+                                    picks.append({"type": "external", "url": u, **({"title": title} if title else {})})
+                                    if len(externals) + len(picks) >= 3:
+                                        break
+                                if len(externals) + len(picks) >= 3:
+                                    break
+                            if picks:
+                                base_sources = base_sources + picks
+                                ds.sources = base_sources
+                                try:
+                                    if not isinstance(ds.meta, dict):
+                                        ds.meta = {}
+                                except Exception:
+                                    ds.meta = {}
+                                ds.meta["auto_populated_sources"] = True
+                    except Exception:
+                        pass
                     if transcript_rel:
                         try:
                             ds.links = (ds.links or []) + [{"type": "artifact", "id": transcript_rel, "title": "Huddle Transcript"}]
@@ -1324,8 +1441,61 @@ class RouterRunner:
                             ds.sources = base_sources
                         except Exception:
                             pass
-                    saved = save_decisions(self.run_dir, self.artifacts, self.rag, [ds])
+                    def _autopopulate_from_recent(ds_obj):
+                        try:
+                            if ds_obj.sources:
+                                return ds_obj
+                            recent = list(self._web_recent)[-3:]
+                            if not recent:
+                                return ds_obj
+                            urls_ranked: List[Dict[str, Any]] = []
+                            for r in recent:
+                                obsr = r.get("obs") or {}
+                                res = obsr.get("results") or []
+                                exs = obsr.get("extracts") or []
+                                ok_urls = set([e.get("url") for e in exs if isinstance(e, dict) and str(e.get("status")) == "200" and (e.get("content_md") or "")])
+                                for it in res:
+                                    u = (it or {}).get("url")
+                                    if not u:
+                                        continue
+                                    title = (it or {}).get("title") or None
+                                    ts_val = (it or {}).get("time?") or None
+                                    score = 1 + (5 if u in ok_urls else 0)
+                                    urls_ranked.append({"url": u, "title": title, "ts": ts_val, "score": score})
+                            if not urls_ranked:
+                                return ds_obj
+                            seen = set()
+                            picks: List[Dict[str, Any]] = []
+                            for it in sorted(urls_ranked, key=lambda x: x.get("score", 0), reverse=True):
+                                u = it.get("url")
+                                if u in seen:
+                                    continue
+                                seen.add(u)
+                                picks.append({"type": "external", "url": u, **({"title": it.get("title")} if it.get("title") else {}), **({"ts": it.get("ts")} if it.get("ts") else {})})
+                                if len(picks) >= 5:
+                                    break
+                            if picks:
+                                ds_obj.sources = (ds_obj.sources or []) + picks
+                                try:
+                                    if not isinstance(ds_obj.meta, dict):
+                                        ds_obj.meta = {}
+                                except Exception:
+                                    ds_obj.meta = {}
+                                ds_obj.meta["auto_populated_sources"] = True
+                        except Exception:
+                            pass
+                        return ds_obj
+
+                    if not ds.sources:
+                        ds = _autopopulate_from_recent(ds)
+
+                    from .huddle import persist_decision_summary
+                    ds, ds_rel = persist_decision_summary(self.run_dir, self.artifacts, self.rag, ds)
                     decisions.append(ds)
+                    try:
+                        self.logger.log("decision_summary_updated", ds_id=ds.id, fields_updated=["sources", "links", "meta"], path=os.path.join(self.run_dir, ds_rel))
+                    except Exception:
+                        pass
                     if hud_id:
                         try:
                             rec_path = os.path.join(self.run_dir, "artifacts", "huddles", f"{hud_id}.json")
@@ -1453,6 +1623,20 @@ class RouterRunner:
                     lang = tool_args.get("language")
                     pageno = tool_args.get("pageno")
                     obs = self._web_search_exec(q, k, tr, eng, lang, pageno)
+                    hud_ctx = None
+                    try:
+                        if unread_huddles:
+                            last_hud = unread_huddles[-1]
+                            hud_ctx = (last_hud or {}).get("huddle_id")
+                    except Exception:
+                        hud_ctx = None
+                    try:
+                        entry = {"ts": __import__("time").time(), "huddle_id": hud_ctx, "query": q, "obs": obs}
+                        self._web_recent.append(entry)
+                        if len(self._web_recent) > 5:
+                            self._web_recent = self._web_recent[-5:]
+                    except Exception:
+                        pass
                 elif tool_name == "run_contract_tests":
                     tests = [str(t) for t in (tool_args.get("tests") or [])]
                     results = runner.scan_and_run()
@@ -1607,6 +1791,8 @@ class RouterRunner:
             pass
 
         summary = self._build_summary(agents or {}, evaluator, decisions)
+        if self._web_disabled_by_flag:
+            summary["web_search"] = "disabled_by_flag"
         summary["finalization_report"] = os.path.join("artifacts", "finalization", "report.json")
         self.artifacts.add_text("run_summary.json", json.dumps(summary, indent=2), tags=["summary"])
         self.logger.log("run_complete", summary_path=os.path.join(self.run_dir, "artifacts", "run_summary.json"))

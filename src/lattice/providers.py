@@ -1,5 +1,6 @@
 import json
 import time
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -17,6 +18,13 @@ def _is_rate_limited(status: int, data: Any) -> bool:
         if "rate" in msg.lower():
             return True
     return False
+
+
+def _is_gpt_oss_model(model: Optional[str]) -> bool:
+    try:
+        return "gpt-oss" in (model or "").lower()
+    except Exception:
+        return False
 
 
 class OpenAICompatProvider:
@@ -49,11 +57,40 @@ class OpenAICompatProvider:
         tool_choice: Optional[str] = None,
     ) -> Tuple[str, Dict[str, Any]]:
         url = self.cfg.base_url.rstrip("/") + "/chat/completions"
-        body: Dict[str, Any] = {
-            "model": model or self.cfg.model,
-            "messages": messages,
-            "temperature": temperature,
-        }
+        model_to_use = model or self.cfg.model
+
+        if _is_gpt_oss_model(model_to_use):
+            try:
+                gptoss_temp = float(os.environ.get("LATTICE_GPTOSS_TEMPERATURE", "1"))
+            except Exception:
+                gptoss_temp = 1.0
+            try:
+                gptoss_top_k = int(os.environ.get("LATTICE_GPTOSS_TOP_K", "0"))
+            except Exception:
+                gptoss_top_k = 0
+            try:
+                gptoss_min_p = float(os.environ.get("LATTICE_GPTOSS_MIN_P", "0.05"))
+            except Exception:
+                gptoss_min_p = 0.05
+            try:
+                gptoss_top_p = float(os.environ.get("LATTICE_GPTOSS_TOP_P", "1"))
+            except Exception:
+                gptoss_top_p = 1.0
+
+            body: Dict[str, Any] = {
+                "model": model_to_use,
+                "messages": messages,
+                "temperature": gptoss_temp,
+                "top_k": gptoss_top_k,
+                "min_p": gptoss_min_p,
+                "top_p": gptoss_top_p,
+            }
+        else:
+            body: Dict[str, Any] = {
+                "model": model_to_use,
+                "messages": messages,
+                "temperature": temperature,
+            }
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
         if tools:

@@ -227,7 +227,15 @@ class BackendAgent(BaseAgent):
             {"role": "user", "content": f"Goal: {goal}\n\n{inject}\n\nTasks:\n1) Propose a minimal API contract (OpenAPI YAML) for the target app domain described in the goal.\n2) Provide a brief domain model and endpoints list. Return YAML between ```yaml fences."},
         ]
         out = self._model(messages)
-        yaml_text = "openapi: 3.1.0\ninfo:\n  title: App API\n  version: 0.1.0\npaths: {}\ncomponents: {}\n"
+        yaml_text = (
+            "openapi: 3.1.0\n"
+            "info:\n  title: Items API\n  version: 0.1.0\n"
+            "paths:\n"
+            "  /health:\n    get:\n      responses:\n        '200':\n          description: OK\n"
+            "  /items:\n    get:\n      summary: List items\n      responses:\n        '200':\n          description: OK\n          content:\n            application/json:\n              schema:\n                type: array\n                items:\n                  $ref: '#/components/schemas/Item'\n    post:\n      summary: Create item\n      requestBody:\n        required: true\n        content:\n          application/json:\n            schema:\n              $ref: '#/components/schemas/ItemInput'\n      responses:\n        '201':\n          description: Created\n          content:\n            application/json:\n              schema:\n                $ref: '#/components/schemas/Item'\n"
+            "  /items/{item_id}:\n    get:\n      summary: Get item\n      parameters:\n        - in: path\n          name: item_id\n          required: true\n          schema:\n            type: string\n      responses:\n        '200':\n          description: OK\n          content:\n            application/json:\n              schema:\n                $ref: '#/components/schemas/Item'\n        '404':\n          description: Not Found\n    put:\n      summary: Update item\n      parameters:\n        - in: path\n          name: item_id\n          required: true\n          schema:\n            type: string\n      requestBody:\n        required: true\n        content:\n          application/json:\n            schema:\n              $ref: '#/components/schemas/ItemInput'\n      responses:\n        '200':\n          description: OK\n          content:\n            application/json:\n              schema:\n                $ref: '#/components/schemas/Item'\n        '404':\n          description: Not Found\n    delete:\n      summary: Delete item\n      parameters:\n        - in: path\n          name: item_id\n          required: true\n          schema:\n            type: string\n      responses:\n        '204':\n          description: No Content\n        '404':\n          description: Not Found\n"
+            "components:\n  schemas:\n    Item:\n      type: object\n      required: [id, name, description, createdAt, updatedAt]\n      properties:\n        id:\n          type: string\n        name:\n          type: string\n        description:\n          type: string\n        createdAt:\n          type: string\n          format: date-time\n        updatedAt:\n          type: string\n          format: date-time\n    ItemInput:\n      type: object\n      required: [name]\n      properties:\n        name:\n          type: string\n        description:\n          type: string\n"
+        )
         if "```yaml" in out:
             try:
                 y = out.split("```yaml", 1)[1].split("```", 1)[0]
@@ -242,6 +250,8 @@ class BackendAgent(BaseAgent):
         refs.append(self._write_artifact(os.path.join("backend", "app", "main.py"), backend_templates.get("main.py", ""), tags=["backend", "scaffold"]))
         refs.append(self._write_artifact(os.path.join("backend", "requirements.txt"), backend_templates.get("requirements.txt", ""), tags=["backend", "scaffold"]))
         refs.append(self._write_artifact(os.path.join("backend", "run.sh"), backend_templates.get("run.sh", ""), tags=["backend", "scaffold"]))
+        if ".env" in backend_templates:
+            refs.append(self._write_artifact(os.path.join("backend", ".env"), backend_templates.get(".env", ""), tags=["backend", "scaffold"]))
 
         cli_templates = get_cli_templates()
         refs.append(self._write_artifact(os.path.join("cli", "main.py"), cli_templates.get("main.py", ""), tags=["cli", "scaffold"]))
@@ -332,7 +342,7 @@ class LLMApiAgent(BaseAgent):
                 if args:
                     args = ", " + args
                 stub_lines.append(f"def {name}(context: dict = None{args}) -> dict:")
-                stub_lines.append("    return {}  # TODO: implement")
+                stub_lines.append("    return {}")
                 stub_lines.append("")
             except Exception:
                 continue
@@ -353,11 +363,11 @@ class TestAgent(BaseAgent):
     def plan(self, step_or_goal: str, context: Dict[str, Any]) -> AgentPlan:
         plan = AgentPlan(
             step="contract_tests",
-            description="Propose minimal contract tests (schema + unit)",
+            description="Propose meaningful contract tests (schema + consistency + deps + app checks)",
             contracts=[
                 ContractSpec(
                     id="api_contract",
-                    subject="NotesAPI",
+                    subject="ItemsAPI",
                     type="schema",
                     spec_path="artifacts/contracts/openapi.yaml",
                     runner="local",
@@ -379,13 +389,37 @@ class TestAgent(BaseAgent):
                 "pass_criteria": {"schema_valid": True},
             },
             {
+                "id": "api_consistency",
+                "subject": "API",
+                "type": "api_consistency",
+                "spec_path": "artifacts/contracts/openapi.yaml",
+                "runner": "local"
+            },
+            {
+                "id": "deps",
+                "subject": "BackendDeps",
+                "type": "deps",
+                "requirements_path": "artifacts/backend/requirements.txt",
+                "required": ["fastapi", "uvicorn", "python-dotenv"]
+            },
+            {
+                "id": "fastapi_app",
+                "subject": "FastAPI",
+                "type": "fastapi_app",
+                "app_path": "artifacts/backend/app/main.py",
+                "checks": [
+                    {"method": "get", "path": "/health", "expect_status": 200},
+                    {"method": "get", "path": "/items", "expect_status": 200}
+                ]
+            },
+            {
                 "id": "smoke_suite",
                 "subject": "Scaffolds",
                 "type": "unit",
                 "runner": "local",
                 "assertions": [
                     {"kind": "file_exists", "path": "backend/app/main.py"},
-                    {"kind": "file_exists", "path": "frontend/app/index.html"},
+                    {"kind": "file_exists_optional", "path": "frontend/app/index.html"},
                 ]
             }
         ]

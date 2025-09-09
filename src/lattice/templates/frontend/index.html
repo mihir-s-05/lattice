@@ -10,7 +10,26 @@
     <header><h1>{{app_title}}</h1></header>
     <main>
       <section>
-        <p>This is a minimal front-end scaffold. Wire it to your API and components defined in ui_schema.json.</p>
+        <p>Items fetched from your backend API will appear below. Set localStorage API_BASE to override default (e.g. http://localhost:8000). Optionally set API_KEY for write operations.</p>
+      </section>
+      <section>
+        <h2>Items</h2>
+        <ul id="items"></ul>
+      </section>
+      <section>
+        <h2>Create Item</h2>
+        <form id="create-form">
+          <label>
+            Name
+            <input type="text" name="name" required />
+          </label>
+          <label>
+            Description
+            <input type="text" name="description" />
+          </label>
+          <button type="submit">Create</button>
+        </form>
+        <p id="status" aria-live="polite"></p>
       </section>
     </main>
     <script src="script.js"></script>

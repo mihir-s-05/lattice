@@ -8,7 +8,13 @@ from typing import Any, Dict, List, Optional, Tuple
 from .artifacts import ArtifactStore
 from .runlog import RunLogger
 from .stage_gates import GateEvaluator, StageGate
-from .huddle import DecisionSummary
+from .huddle import (
+    DecisionSummary,
+    ensure_unique_ids,
+    dedupe_decisions,
+    ensure_provenance_links,
+    validate_decision_integrity,
+)
 from .provenance import compute_current_sha256
 from .constants import (
     DEFAULT_DECISION_DIR,
@@ -82,14 +88,34 @@ def _write_decision_log_and_citations(run_dir: str, decisions: List[DecisionSumm
             lines.append(f"Rationale: {d.rationale}")
         if d.sources:
             lines.append("Sources:")
-            for s in d.sources or []:
+            externals = [s for s in (d.sources or []) if isinstance(s, dict) and s.get("type") == "external"]
+            artifacts = [s for s in (d.sources or []) if isinstance(s, dict) and s.get("type") == "artifact"]
+            rags = [s for s in (d.sources or []) if isinstance(s, dict) and s.get("type") == "rag_doc"]
+            for s in externals:
                 try:
-                    if s.get("type") == "artifact":
-                        lines.append(f"- artifact:{s.get('id')} ({s.get('hash','')})")
-                    elif s.get("type") == "rag_doc":
-                        lines.append(f"- rag_doc:{s.get('id')} score={s.get('score')}")
+                    title = s.get("title")
+                    url = s.get("url")
+                    if title:
+                        lines.append(f"- {title}: {url}")
+                    else:
+                        lines.append(f"- {url}")
                 except Exception:
                     continue
+            for s in artifacts:
+                try:
+                    lines.append(f"- artifact:{s.get('id')} ({s.get('hash','')})")
+                except Exception:
+                    continue
+            for s in rags:
+                try:
+                    lines.append(f"- rag_doc:{s.get('id')} score={s.get('score')}")
+                except Exception:
+                    continue
+            try:
+                if isinstance(getattr(d, "meta", None), dict) and d.meta.get("auto_populated_sources"):
+                    lines.append("(sources auto-populated from recent web search)")
+            except Exception:
+                pass
         lines.append("")
         if d.sources:
             cite_index[d.id] = list(d.sources)
@@ -154,6 +180,15 @@ def run_finalization(
 
     linters: List[Dict[str, Any]] = []
 
+    decision_integrity: Dict[str, Any] = {"status": "ok"}
+    try:
+        decisions = ensure_unique_ids(decisions)
+        decisions = dedupe_decisions(decisions)
+        decisions = ensure_provenance_links(decisions)
+        validate_decision_integrity(decisions)
+    except Exception as e:
+        decision_integrity = {"status": "error", "error": str(e)}
+
     drift = _compute_drift(run_dir, decisions)
 
     zip_rel = _create_deliverables_zip(run_dir)
@@ -167,6 +202,7 @@ def run_finalization(
         "deliverables": [zip_rel],
         "decision_log_path": dec_log_rel,
         "citation_index_path": cite_rel,
+        "decision_integrity": decision_integrity,
     }
     artifacts.add_text(os.path.join("finalization", "report.json"), json.dumps(report, indent=2), tags=["finalization"])
     return report

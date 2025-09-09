@@ -16,7 +16,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         os.environ["LATTICE_ROUTER_MODEL"] = args.router_model
     if getattr(args, "huddles", None):
         os.environ["LATTICE_HUDDLES"] = args.huddles
-    runner = RouterRunner(cwd=os.getcwd())
+    runner = RouterRunner(cwd=os.getcwd(), no_websearch=getattr(args, "no_websearch", False))
     try:
         result = runner.run(goal=prompt)
     except Exception as e:
@@ -216,6 +216,7 @@ def build_parser() -> argparse.ArgumentParser:
     pr = sub.add_parser("run", help="Run a single worker turn")
     pr.add_argument("prompt", help="Prompt text, wrap in quotes")
     pr.add_argument("--no-rag", action="store_true", help="Disable RAG for this run")
+    pr.add_argument("--no-websearch", action="store_true", help="Force web_search to return tool_unavailable (local adapter disabled)")
     pr.add_argument("--router-provider", dest="router_provider", help="Router provider (e.g., groq or lmstudio)", nargs='?')
     pr.add_argument("--router-model", dest="router_model", help="Router model id (e.g., openai/gpt-oss-120b)", nargs='?')
     pr.add_argument("--huddles", dest="huddles", choices=["dialog", "synthesis"], help="Huddle mode: dialog or synthesis", nargs='?')
