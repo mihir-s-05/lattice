@@ -1,0 +1,6 @@
+[
+  { "run_id": "run-001", "status": "completed", "started_at": "2025-09-09T20:05:00Z", "provider": "groq", "model": "llama-3.1-70b" },
+  { "run_id": "run-002", "status": "running",   "started_at": "2025-09-09T21:15:00Z", "provider": "openai", "model": "gpt-4o" },
+  { "run_id": "run-003", "status": "failed",    "started_at": "2025-09-09T21:45:00Z", "provider": "anthropic", "model": "claude-3.5" },
+  { "run_id": "run-004", "status": "queued",    "started_at": "2025-09-09T22:00:00Z", "provider": "groq", "model": "mixtral" }
+]

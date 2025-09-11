@@ -1,0 +1,16 @@
+{"type":"run_status","run_id":"run-001","status":"running","started_at":"2025-09-09T18:00:00Z","provider":"openai","model":"gpt-4o"}
+{"type":"router_message","message_id":"m1","role":"system","content_md":"Run started for prompt: build FE+BE skeleton for a notes app"}
+{"type":"plan_switch","from_mode":"bootstrap","to_mode":"parallel","reason_type":"capability"}
+{"type":"agent_turn","agent":"Frontend","phase":"plan","content_md":"Plan: Create React app, set up Tailwind, build notes list and editor.","artifacts_written":[]}
+{"type":"agent_turn","agent":"Backend","phase":"plan","content_md":"Plan: FastAPI with endpoints for notes CRUD, SQLite via SQLModel.","artifacts_written":[]}
+{"type":"router_message","message_id":"m2","role":"router_llm","content_md":"Let's scaffold the frontend first, then wire backend APIs."}
+{"type":"web_search","source":"groq","query":"best practices tailwind layout","results_count":3,"urls_fetched":3,"latency_ms":320,"results":[],"extracts":[{"url":"https://tailwindcss.com/docs","title":"Tailwind Docs","excerpt":"Utility-first CSS framework..."}]}
+{"type":"agent_turn","agent":"Frontend","phase":"act","content_md":"Create layout with sidebar, main, inspector. Implement chat timeline.","artifacts_written":["webui/src/app/components/RunSidebar.tsx"]}
+{"type":"decision_summary_created","ds_id":"ds1","summary":{"ds_id":"ds1","topic":"UI Layout","decision":"Use 3-column responsive layout","rationale":"Meets Milestone utilitarian goals","sources":[{"kind":"external","title":"Tailwind Guide","url":"https://tailwindcss.com"}]}}
+{"type":"huddle_open","huddle_id":"h1","topic":"API contract","attendees":["Frontend","Backend"],"transcript_path":"huddles/h1.md"}
+{"type":"agent_turn","agent":"Backend","phase":"act","content_md":"Implement /runs endpoints and SSE stream.","artifacts_written":["backend/app.py"]}
+{"type":"contract_test_result","id":"ct1","status":"passed","metrics":{"latency_ms":120}}
+{"type":"gate_eval","gate_id":"g1","status":"passed","checked_conditions":["FE boots","BE boots"]}
+{"type":"huddle_complete","huddle_id":"h1"}
+{"type":"router_message","message_id":"m3","role":"router_llm","content_md":"Great progress. Proceed to finalize and produce deliverables."}
+{"type":"finalization","report_path":"report.md","deliverables_path":"deliverables.zip"}
