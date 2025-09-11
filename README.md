@@ -127,13 +127,15 @@ lattice logs <run_id> --follow
 ### 4. Inspect Results
 ```bash
 # Project structure created under:
-runs/<run_id>/artifacts/
+~/.lattice/runs/<run_id>/artifacts/
 ├── backend/        # FastAPI application
 ├── frontend/       # Web interface  
 ├── contracts/      # OpenAPI specs & tests
 ├── decisions/      # Decision summaries
 └── deliverables/   # Final ZIP bundle
 ```
+
+Note: By default, runs are stored under `~/.lattice/runs`. You can override this location by setting `LATTICE_RUNS_DIR` to a custom path.
 
 ## Configuration
 
@@ -238,7 +240,7 @@ export LATTICE_WEB_SEARCH_ADAPTER_FIRECRAWL_API_KEY="your_key"
 #### Search Adapter Configuration Options
 ```bash
 # Caching and performance
-LATTICE_WEB_SEARCH_ADAPTER_CACHE_DIR="./runs/<run_id>/cache"
+LATTICE_WEB_SEARCH_ADAPTER_CACHE_DIR="$HOME/.lattice/runs/<run_id>/cache"
 LATTICE_WEB_SEARCH_ADAPTER_RESPECT_ROBOTS="on"
 
 # Content filtering  
@@ -402,7 +404,7 @@ LLM-driven decision generation:
 
 ### Directory Structure
 ```
-runs/<run_id>/
+~/.lattice/runs/<run_id>/
 ├── artifacts/
 │   ├── backend/           # FastAPI application
 │   │   ├── app/main.py    # Server implementation
@@ -496,10 +498,10 @@ export LATTICE_WEB_SEARCH_ADAPTER_SEARCH_BASE_URL="http://localhost:8080"
 #### Contract Tests Failing
 ```bash
 # Ensure test definitions exist
-ls runs/<run_id>/artifacts/contracts/tests/
+ls ~/.lattice/runs/<run_id>/artifacts/contracts/tests/
 
 # Check test results
-cat runs/<run_id>/artifacts/contracts/results/*.json
+cat ~/.lattice/runs/<run_id>/artifacts/contracts/results/*.json
 ```
 
 #### Provider Fallbacks
@@ -512,7 +514,7 @@ lattice logs <run_id> | grep "provider_switch"
 For detailed debugging, examine the structured logs:
 ```bash
 # Raw JSONL events (all system events)
-cat runs/<run_id>/run.jsonl
+cat ~/.lattice/runs/<run_id>/run.jsonl
 
 # Formatted model outputs only (clean, readable)
 lattice logs <run_id> --output-only
