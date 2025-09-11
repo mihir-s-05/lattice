@@ -81,7 +81,7 @@ def _write_decision_log_and_citations(run_dir: str, decisions: List[DecisionSumm
     lines: List[str] = ["# Decision Log", ""]
     cite_index: Dict[str, List[Dict[str, Any]]] = {}
     try:
-        from .huddle import _normalize_sources  # local import to avoid cycles
+        from .huddle import _normalize_sources
     except Exception:
         _normalize_sources = lambda x: (x or [])
     for d in decisions:

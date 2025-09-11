@@ -164,7 +164,6 @@ def get_runs_base_dir() -> str:
     try:
         os.makedirs(base, exist_ok=True)
     except Exception:
-        # As a last resort, fall back to a local runs directory
         fallback = os.path.join(os.getcwd(), "runs")
         os.makedirs(fallback, exist_ok=True)
         return fallback

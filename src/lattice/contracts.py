@@ -67,7 +67,7 @@ class ContractRunner:
             with open(abs_path, "r", encoding="utf-8", errors="ignore") as f:
                 text = f.read(512_000)
             try:
-                import yaml  # type: ignore
+                import yaml
 
                 return yaml.safe_load(text)
             except Exception:
@@ -307,7 +307,7 @@ class ContractRunner:
                 abs_app = self._abs(app_path)
                 checks = spec.get("checks") or []
                 try:
-                    from starlette.testclient import TestClient  # type: ignore
+                    from starlette.testclient import TestClient
                 except Exception as e:
                     evidence.append({"message": "TestClient not available (install fastapi/starlette)", "error": str(e)})
                     status = "failed"
@@ -319,9 +319,9 @@ class ContractRunner:
                 else:
                     try:
                         specm = importlib.util.spec_from_file_location("generated_app", abs_app)
-                        modu = importlib.util.module_from_spec(specm)  # type: ignore
+                        modu = importlib.util.module_from_spec(specm)
                         assert specm and specm.loader
-                        specm.loader.exec_module(modu)  # type: ignore
+                        specm.loader.exec_module(modu)
                         app = getattr(modu, "app", None)
                         if app is None:
                             evidence.append({"path": app_path, "message": "No 'app' found in module"})

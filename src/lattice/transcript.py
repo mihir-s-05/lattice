@@ -130,7 +130,6 @@ class RunningTranscript:
         return "\n".join(parts) + "\n"
 
 
-# --- Automatic transcript generation from run.jsonl ---
 
 def _safe_read(path: str) -> Optional[str]:
     try:
@@ -195,7 +194,6 @@ def generate_run_transcript(run_dir: str, out_filename: str = "transcript.md") -
         pass
 
     decision_paths: Dict[str, str] = {}
-    # First pass to collect decision paths
     try:
         with open(log_path, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -209,7 +207,6 @@ def generate_run_transcript(run_dir: str, out_filename: str = "transcript.md") -
                     if did and path:
                         decision_paths[did] = path
     except FileNotFoundError:
-        # Nothing to do if log doesn't exist yet
         with open(out_path, "w", encoding="utf-8") as out:
             out.write(f"# Run Transcript: {os.path.basename(run_dir)}\n\n(no log found)\n")
         return out_path
@@ -227,13 +224,11 @@ def generate_run_transcript(run_dir: str, out_filename: str = "transcript.md") -
             ts = rec.get("ts", "")
             ev = rec.get("event", "")
 
-            # Router LLM immediate outputs (rarely present as response_text)
             if ev == "router_llm_turn":
                 model = rec.get("model") or router_model_default
                 _write_block(out, ts, model, "router", "router_llm_turn", rec.get("response_text"))
                 continue
 
-            # Huddles
             if ev == "huddle_open":
                 topic = rec.get("topic", "")
                 attendees = rec.get("attendees", [])
@@ -261,7 +256,6 @@ def generate_run_transcript(run_dir: str, out_filename: str = "transcript.md") -
                 _write_block(out, ts, router_model_default, "router", "huddle_decision", "\n".join(lines))
                 continue
 
-            # Decision summaries
             if ev == "router_tool_call" and rec.get("tool_name") == "record_decision_summary":
                 params = rec.get("params") or {}
                 obs = rec.get("observation") or {}
@@ -297,7 +291,6 @@ def generate_run_transcript(run_dir: str, out_filename: str = "transcript.md") -
                 _write_block(out, ts, router_model_default, "router", "decision_summary", "\n".join(content), lang_hint="markdown")
                 continue
 
-            # Model outputs (agents and router)
             if ev == "model_call":
                 messages = rec.get("messages") or []
                 sys_text = ""
@@ -311,7 +304,6 @@ def generate_run_transcript(run_dir: str, out_filename: str = "transcript.md") -
                     _write_block(out, ts, rec.get("model") or (router_model_default if role == "router" else agent_model_default), role, "model_output", out_text)
                 continue
 
-            # Huddle agent previews (if present)
             if ev == "agent_model_turn":
                 agent = rec.get("agent")
                 role = f"agent:{agent}" if agent and not str(agent).startswith("agent:") else (agent or "agent")
@@ -321,7 +313,6 @@ def generate_run_transcript(run_dir: str, out_filename: str = "transcript.md") -
                     _write_block(out, ts, model, role, "agent_model_turn", prev, lang_hint="markdown")
                 continue
 
-            # Finalization snapshot
             if ev == "pre_finalization_validation":
                 _write_block(out, ts, router_model_default, "router", "pre_finalization_validation", json.dumps(rec, ensure_ascii=False, indent=2), lang_hint="json")
                 continue

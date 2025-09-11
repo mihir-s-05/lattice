@@ -7,6 +7,10 @@ name = "lattice-cli"
 version = "0.1.0"
 description = "LATTICE Milestone 1: CLI worker runner with providers, artifacts, RAG, and logging"
 readme = "README.md"
+license = { file = "LICENSE" }
+classifiers = [
+  "License :: OSI Approved :: Apache Software License",
+]
 requires-python = ">=3.9"
 dependencies = [
   "requests>=2.28.0",
@@ -21,6 +25,7 @@ lattice = "lattice.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+license-files = ["LICENSE"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

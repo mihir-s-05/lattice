@@ -666,7 +666,6 @@ class RouterRunner:
         summary["finalization_report"] = os.path.join("artifacts", "finalization", "report.json")
         self.artifacts.add_text("run_summary.json", json.dumps(summary, indent=2), tags=["summary"])
         self.logger.log("run_complete", summary_path=os.path.join(self.run_dir, "artifacts", "run_summary.json"))
-        # Auto-generate transcript after run completion so it includes final events
         tp = None
         try:
             tp = generate_run_transcript(self.run_dir)
@@ -1404,7 +1403,7 @@ class RouterRunner:
                             rec_obj = None
                     ds = parse_decision_summaries(json.dumps(d_obj))[0]
                     try:
-                        from .huddle import _normalize_sources  # type: ignore
+                        from .huddle import _normalize_sources
                         base_sources = _normalize_sources(ds.sources)
                         externals = [s for s in base_sources if s.get("type") == "external"]
                         if len(externals) < 3 and self._web_recent:
@@ -1804,7 +1803,6 @@ class RouterRunner:
         summary["finalization_report"] = os.path.join("artifacts", "finalization", "report.json")
         self.artifacts.add_text("run_summary.json", json.dumps(summary, indent=2), tags=["summary"])
         self.logger.log("run_complete", summary_path=os.path.join(self.run_dir, "artifacts", "run_summary.json"))
-        # Auto-generate transcript after run completion so it includes final events
         tp = None
         try:
             tp = generate_run_transcript(self.run_dir)

@@ -471,6 +471,13 @@ LATTICE maintains complete traceability from sources to decisions:
 - **Citation Index**: `artifacts/citations/index.json` - Machine-readable mappings
 - **Drift Report**: Detection of changed artifacts since decision time
 
+## License
+
+This project is licensed under the Apache License 2.0.
+
+- SPDX-License-Identifier: Apache-2.0
+- See the top-level [LICENSE](LICENSE) file for the full text.
+
 ## Troubleshooting
 
 ### Common Issues

@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException, Request, Response, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 try:
-    from dotenv import load_dotenv, find_dotenv  # type: ignore
+    from dotenv import load_dotenv, find_dotenv
     load_dotenv(find_dotenv(), override=False)
 except Exception:
     pass
