@@ -63,7 +63,7 @@ LATTICE uses a hub-and-spoke architecture with the Router LLM as the central coo
               │
     ┌─────────┼───────┐
     │         │       │
-┌───▼───┐ ┌──▼──┐ ┌──▼──┐ ┌───▼────┐
+┌───▼───┐ ┌──▼──–––┐ ┌──▼──┐ ┌───▼────┐
 │Backend│ │Frontend│ │Tests│ │LLM API │
 │Agent  │ │ Agent  │ │Agent│ │ Agent  │
 └───────┘ └────────┘ └─────┘ └────────┘
