@@ -1,4 +1,4 @@
-# LATTICE — LLM-Driven Multi-Agent Orchestrator
+# LATTICE - LLM-Driven Multi-Agent Orchestrator
 
 LATTICE is a CLI-only, single-process orchestration runtime that coordinates multiple AI agents via an intelligent Router LLM. It provides structured workflow management, contract testing, provenance tracking, web search capabilities, and comprehensive deliverables generation for software development projects.
 
