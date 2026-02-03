@@ -11,22 +11,29 @@ class TestTokenize:
     def test_basic_tokenization(self):
         from lattice.rag import tokenize
         result = tokenize("Hello World")
-        assert result == ["hello", "world"]
+        assert "hello" in result
+        assert "world" in result
     
     def test_handles_punctuation(self):
         from lattice.rag import tokenize
         result = tokenize("Hello, World! How are you?")
-        assert result == ["hello", "world", "how", "are", "you"]
+        assert "hello" in result
+        assert "world" in result
+        assert "how" in result
     
     def test_handles_numbers(self):
         from lattice.rag import tokenize
         result = tokenize("Python 3.9 and version 2.0")
-        assert result == ["python", "3", "9", "and", "version", "2", "0"]
+        assert "python" in result
+        assert "3.9" in result
+        assert "version" in result
+        assert "2.0" in result
     
     def test_handles_underscores(self):
         from lattice.rag import tokenize
         result = tokenize("hello_world function_name")
-        assert result == ["hello_world", "function_name"]
+        assert "hello_world" in result
+        assert "function_name" in result
     
     def test_empty_string(self):
         from lattice.rag import tokenize
@@ -41,7 +48,7 @@ class TestRagIndex:
         from lattice.rag import RagIndex
         rag = RagIndex(tmp_run_dir)
         assert rag.docs == {}
-        assert rag.vocab == {}
+        assert rag.df == {}
     
     def test_ingest_text_adds_document(self, tmp_run_dir):
         from lattice.rag import RagIndex
@@ -115,26 +122,29 @@ class TestRagIndex:
         assert any(h.get("doc_id") == "hud1" for h in sem_hits)
 
 
-class TestCosine:
-    """Tests for cosine similarity calculation."""
-    
-    def test_identical_vectors(self, tmp_run_dir):
-        from lattice.rag import RagIndex
-        rag = RagIndex(tmp_run_dir)
-        vec = {0: 1.0, 1: 2.0, 2: 3.0}
-        result = rag._cosine(vec, vec)
-        assert abs(result - 1.0) < 0.0001
-    
-    def test_orthogonal_vectors(self, tmp_run_dir):
-        from lattice.rag import RagIndex
-        rag = RagIndex(tmp_run_dir)
-        vec_a = {0: 1.0}
-        vec_b = {1: 1.0}
-        result = rag._cosine(vec_a, vec_b)
-        assert result == 0.0
-    
-    def test_empty_vectors(self, tmp_run_dir):
-        from lattice.rag import RagIndex
-        rag = RagIndex(tmp_run_dir)
-        result = rag._cosine({}, {})
-        assert result == 0.0
+class TestCodeAwareTokenize:
+    def test_splits_dotted_identifiers(self):
+        from lattice.rag import tokenize
+
+        toks = tokenize("self.cfg.base_url app.route")
+        assert "cfg" in toks
+        assert "base_url" in toks
+        assert "app.route" in toks
+        assert "route" in toks
+
+    def test_splits_camel_and_snake(self):
+        from lattice.rag import tokenize
+
+        toks = tokenize("handleRequest handle_request")
+        assert "handlerequest" in toks
+        assert "handle" in toks
+        assert "request" in toks
+        assert "handle_request" in toks
+
+    def test_filters_common_code_stopwords(self):
+        from lattice.rag import tokenize
+
+        toks = tokenize("def handler(self): return self.value")
+        assert "handler" in toks
+        assert "self" not in toks
+        assert "return" not in toks

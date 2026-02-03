@@ -2,6 +2,7 @@ import json
 import time
 import os
 import random
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -564,12 +565,27 @@ def call_with_fallback(
                 transient = True
                 if isinstance(provider_error, ProviderError):
                     context = provider_error.context
-                    status_code = context.get("status_code")
-                    if status_code:
-                        transient = status_code in [429, 500, 502, 503, 504]
-                    elif "HTTP" in str(provider_error):
-                        m = str(provider_error)
-                        transient = any(code in m for code in ["429", "500", "502", "503", "504"])
+                    status_code: Optional[int] = None
+                    raw_status = context.get("status_code")
+                    if isinstance(raw_status, int):
+                        status_code = raw_status
+                    elif isinstance(raw_status, str) and raw_status.isdigit():
+                        status_code = int(raw_status)
+                    if status_code is None:
+                        resp = context.get("response")
+                        if isinstance(resp, str):
+                            mo = re.search(r"\[(\d{3})\]", resp)
+                            if mo:
+                                status_code = int(mo.group(1))
+                    if status_code is None:
+                        msg = str(provider_error)
+                        for pat in (r"\bHTTP\s+(\d{3})\b", r"\b(\d{3})\s+Client Error\b", r"\b(\d{3})\s+Server Error\b"):
+                            mo = re.search(pat, msg)
+                            if mo:
+                                status_code = int(mo.group(1))
+                                break
+                    if status_code is not None:
+                        transient = status_code in (408, 429) or 500 <= status_code <= 599
                 logger.log(
                     "model_call",
                     caller=caller,

@@ -13,7 +13,7 @@ class TestSha256Bytes:
         from lattice.artifacts import sha256_bytes
         result = sha256_bytes(b"hello")
         assert isinstance(result, str)
-        assert len(result) == 64  # SHA256 hex is 64 chars
+        assert len(result) == 64
     
     def test_consistent_hash(self):
         from lattice.artifacts import sha256_bytes
@@ -141,6 +141,25 @@ class TestArtifactStore:
             store.add_text("../escape.txt", "nope")
         with pytest.raises(ValueError):
             store.add_text("artifacts/../../escape.txt", "nope")
+
+    def test_add_text_rejects_symlink_escape(self, tmp_path):
+        from lattice.artifacts import ArtifactStore
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        store = ArtifactStore(str(run_dir))
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "target.txt").write_text("x", encoding="utf-8")
+
+        link = run_dir / "artifacts" / "link"
+        try:
+            os.symlink(str(outside), str(link), target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks not available")
+
+        with pytest.raises(ValueError):
+            store.add_text("link/escape.txt", "nope")
     
     def test_list_returns_all_artifacts(self, tmp_run_dir):
         from lattice.artifacts import ArtifactStore

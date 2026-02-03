@@ -27,6 +27,7 @@ from .artifacts import ArtifactStore
 from .config import RunConfig, load_run_config
 from .contracts import ContractRunner
 from .errors import ProviderError
+from .execution_modes import ExecutionModeFactory
 from .huddle import (
     DecisionSummary,
     parse_decision_summaries,
@@ -54,6 +55,7 @@ from .constants import DEFAULT_HUDDLE_DIR
 from .router.tools import build_tools_manifest, ROUTER_SYSTEM_PROMPT
 from .checklist import Checklist, default_router_checklist
 from .coherence import run_coherence_checks
+from .command_validation import command_is_dangerous, validate_command
 
 
 class RouterRunner:
@@ -399,23 +401,7 @@ class RouterRunner:
         self._save_checklist()
 
     def _command_is_dangerous(self, cmd: str) -> bool:
-        text = cmd.lower()
-        patterns = [
-            r"\brm\s+-rf\s+/",
-            r"\brm\s+-fr\s+/",
-            r"\brm\s+-r\s+/\b",
-            r"\bdel\s+/s\b",
-            r"\bformat\b",
-            r"\bmkfs\b",
-            r"\bdiskpart\b",
-            r"\bshutdown\b",
-            r"\breboot\b",
-            r"\bpoweroff\b",
-            r"\bdd\s+if=",
-            r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:",
-        ]
-        import re
-        return any(re.search(p, text) for p in patterns)
+        return command_is_dangerous(cmd)
 
     def _command_installs_deps(self, cmd: str) -> bool:
         lowered = cmd.lower()
@@ -484,57 +470,10 @@ class RouterRunner:
         return (None, cmd)
 
     def _validate_command(self, cmd: str) -> Optional[str]:
-        if self._command_is_dangerous(cmd):
-            return "command blocked: dangerous pattern detected"
         policy = getattr(self.cfg, "command_policy", None) if self.cfg else None
         allowlist = list((policy.allowlist if policy else []) or [])
         denylist = list((policy.denylist if policy else []) or [])
-
-        lowered = cmd.lower()
-        blocked_tokens = [
-            "curl ",
-            "wget ",
-            "invoke-webrequest",
-            "iwr ",
-            "irm ",
-            "powershell ",
-            "pwsh ",
-            "certutil",
-            "bitsadmin",
-            "ssh ",
-            "scp ",
-            "sftp ",
-            "ftp ",
-            "telnet ",
-            "nc ",
-            "ncat ",
-            "netcat ",
-            "socat ",
-        ]
-        if any(t in lowered for t in blocked_tokens):
-            return "command blocked: network-capable tooling is disabled by default"
-        for d in denylist:
-            if d and d.lower() in lowered:
-                return f"command blocked by denylist entry: {d}"
-
-        if allowlist:
-            try:
-                parts = self._split_command_args(cmd)
-                head = parts[0] if parts else ""
-            except ValueError:
-                head = cmd.strip().split(" ")[0]
-            if not any(head.lower().startswith(a.lower()) for a in allowlist):
-                return "command blocked: not in allowlist"
-        else:
-            try:
-                parts = self._split_command_args(cmd)
-                head = (parts[0] if parts else "").lower()
-            except ValueError:
-                head = (cmd.strip().split(" ")[0] if cmd.strip() else "").lower()
-            default_allow = {"python", "py", "pytest", "pip", "pip3", "uv", "poetry", "npm", "node", "npx", "pnpm", "yarn", "git", "rg", "ruff", "black", "mypy", "echo", "dir", "type", "cat"}
-            if head and head not in default_allow:
-                return f"command blocked: not in default safe allowlist (head={head}). Configure allowlist to permit."
-        return None
+        return validate_command(cmd, allowlist=allowlist, denylist=denylist)
 
     def _finalization_allowed(
         self,
@@ -667,7 +606,7 @@ class RouterRunner:
                         elif tname == "rag_search":
                             q = targs.get("query") or ""
                             k = int(targs.get("top_k") or 5)
-                            hits = self.rag.search(q, top_k=k)
+                            hits = self.rag.search_rag(q, top_k=k)
                             obs = {"hits": hits}
                         else:
                             obs = {"error": "tool_unavailable", "note": f"Unsupported huddle tool: {tname}"}
@@ -885,6 +824,9 @@ class RouterRunner:
         if getattr(self.cfg, "router_policy", "llm") == "llm":
             return self._run_agentic(goal)
 
+        return self._run_classic(goal)
+
+    def _run_classic(self, goal: str) -> Dict[str, Any]:
         if isinstance(goal, str) and ("readme" in goal.lower() or "docs" in goal.lower()) and self.mode in ("ladder", "tracks"):
             self.logger.log("plan_switch", from_mode=self.mode, to_mode="weave", reason_type="scope_change", details="goal mentions README/docs", decisions=[])
             self.mode = "weave"
@@ -895,33 +837,14 @@ class RouterRunner:
         wr._pre_ingest_repo_files()
 
         transcript = RunningTranscript(self.run_id)
-        kbus = KnowledgeBus(self.run_dir, self.logger)
 
         rllm = RouterLLM(self.cfg, self.logger, tools=self._build_tools_manifest())
-        fe = FrontendAgent("frontend", self.cfg, self.logger, self.artifacts, self.rag, workspace_root=self.cwd)
-        be = BackendAgent("backend", self.cfg, self.logger, self.artifacts, self.rag, workspace_root=self.cwd)
-        llm = LLMApiAgent("llmapi", self.cfg, self.logger, self.artifacts, self.rag, workspace_root=self.cwd)
-        tst = TestAgent("tests", self.cfg, self.logger, self.artifacts, self.rag, workspace_root=self.cwd)
-        agents = {"frontend": fe, "backend": be, "llmapi": llm, "tests": tst}
-
         decisions: List[DecisionSummary] = []
         plan_graph = PlanGraph()
         if self.mode == "weave":
             plan_graph.mode_by_segment = {"critical": "ladder", "docs": "tracks"}
         else:
             plan_graph.mode_by_segment = {"main": self.mode}
-        runner = ContractRunner(self.run_dir, self.logger, workspace_root=self.cwd, run_started_at=self._workspace_baseline_at)
-        from .constants import DEFAULT_STAGE_GATES
-        gates: List[StageGate] = [
-            StageGate(
-                id=gate["id"],
-                name=gate["name"],
-                conditions=gate["conditions"],
-            ) for gate in DEFAULT_STAGE_GATES
-        ]
-        evaluator = GateEvaluator(self.run_dir, self.artifacts, self.logger, workspace_root=self.cwd, run_started_at=self._workspace_baseline_at)
-
-        plan_snapshots: List[Dict[str, Any]] = []
 
         plan_init = None
         try:
@@ -934,335 +857,23 @@ class RouterRunner:
             except OSError:
                 pass
 
-        if self.mode == "ladder":
-            active = [be, llm, tst]
-            ctx = self._agent_context(goal, decisions)
-            plans = [a.plan("contracts", ctx) for a in active]
-            self.logger.log("router_plans", mode=self.mode, step="contracts", plans=[asdict(p) for p in plans])
-            for a in active:
-                refs = a.act(ctx)
-                for r in refs:
-                    self._record_touched(r.path)
-                self.logger.log("agent_turn", agent=a.name, artifacts=[r.path for r in refs])
-            self._sync_checklist_state()
-            self._save_checklist()
-            if any(a.needs_huddle(ctx) for a in active):
-                hud = self._execute_huddle(
-                    topic=self._huddle_topic(goal),
-                    questions=["Resource fields?", "Endpoints & DTOs?", "Error model?"],
-                    proposed_contract=None,
-                    transcript=transcript,
-                    agents=agents,
-                    decisions_so_far=decisions,
-                )
-                decisions = hud.get("decisions", [])
-                transcript.add_decision_injection(decision_injection_text(decisions))
+        mode_handler = ExecutionModeFactory.create(
+            self.mode,
+            self.run_dir,
+            self.logger,
+            self.artifacts,
+            self.rag,
+            self.cfg,
+        )
+        started_at = (self._workspace_baseline_at or self._run_started_at) - 2
+        mode_handler.runner.run_started_at = started_at
+        mode_handler.evaluator.run_started_at = started_at
 
-            results = runner.scan_and_run()
-            gate_results = evaluator.evaluate([g for g in gates if g.id == 'sg_api_contract'])
-            retries = 0
-            while not all(g.status == "passed" for g in gate_results) and retries < 3:
-                self.logger.log("router_block", step="contracts", reason="gate_failed", gates=[asdict(g) for g in gate_results])
-                try:
-                    rllm.refine_step(json.dumps({
-                        "step": "contracts",
-                        "tests": [asdict(r) for r in results],
-                        "gates": [asdict(g) for g in gate_results],
-                    }))
-                except ProviderError as e:
-                    self.logger.log("router_refine_step_failed", step="contracts", error=str(e))
-                results = runner.scan_and_run()
-                gate_results = evaluator.evaluate([g for g in gates if g.id == 'sg_api_contract'])
-                retries += 1
-
-            plan_snapshots.append(
-                {
-                    "mode": self.mode,
-                    "step": "contracts",
-                    "gates": [asdict(g) for g in gate_results],
-                    "tests": [asdict(r) for r in results],
-                }
-            )
-
-            active = [be, llm]
-            ctx = self._agent_context(goal, decisions)
-            plans = [a.plan("backend_scaffold", ctx) for a in active]
-            self.logger.log("router_plans", mode=self.mode, step="backend_scaffold", plans=[asdict(p) for p in plans])
-            for a in active:
-                ctx_phase = dict(ctx)
-                ctx_phase["phase"] = "backend_scaffold"
-                refs = a.act(ctx_phase)
-                for r in refs:
-                    self._record_touched(r.path)
-                self.logger.log("agent_turn", agent=a.name, artifacts=[r.path for r in refs])
-            self._sync_checklist_state()
-            self._save_checklist()
-            results2 = runner.scan_and_run()
-            gate_results2 = evaluator.evaluate([g for g in gates if g.id in ('sg_api_contract','sg_be_scaffold')])
-            retries = 0
-            while not all(g.status == "passed" for g in gate_results2) and retries < 3:
-                self.logger.log("router_block", step="backend_scaffold", reason="gate_failed", gates=[asdict(g) for g in gate_results2])
-                results2 = runner.scan_and_run()
-                gate_results2 = evaluator.evaluate([g for g in gates if g.id in ('sg_api_contract','sg_be_scaffold')])
-                retries += 1
-            plan_snapshots.append(
-                {
-                    "mode": self.mode,
-                    "step": "backend_scaffold",
-                    "gates": [asdict(g) for g in gate_results2],
-                    "tests": [asdict(r) for r in (results + results2)],
-                }
-            )
-
-            active = [fe]
-            ctx = self._agent_context(goal, decisions)
-            plans = [a.plan("frontend_scaffold", ctx) for a in active]
-            self.logger.log("router_plans", mode=self.mode, step="frontend_scaffold", plans=[asdict(p) for p in plans])
-            for a in active:
-                ctx_phase = dict(ctx)
-                ctx_phase["phase"] = "frontend_scaffold"
-                refs = a.act(ctx_phase)
-                for r in refs:
-                    self._record_touched(r.path)
-                self.logger.log("agent_turn", agent=a.name, artifacts=[r.path for r in refs])
-            self._sync_checklist_state()
-            self._save_checklist()
-            results3 = runner.scan_and_run()
-            gate_results3 = evaluator.evaluate([g for g in gates if g.id in ('sg_fe_scaffold','sg_be_scaffold','sg_api_contract')])
-            retries = 0
-            while not all(g.status == "passed" for g in gate_results3) and retries < 3:
-                self.logger.log("router_block", step="frontend_scaffold", reason="gate_failed", gates=[asdict(g) for g in gate_results3])
-                results3 = runner.scan_and_run()
-                gate_results3 = evaluator.evaluate([g for g in gates if g.id in ('sg_fe_scaffold','sg_be_scaffold','sg_api_contract')])
-                retries += 1
-            plan_snapshots.append(
-                {
-                    "mode": self.mode,
-                    "step": "frontend_scaffold",
-                    "gates": [asdict(g) for g in gate_results3],
-                    "tests": [asdict(r) for r in (results + results2 + results3)],
-                }
-            )
-
-            active = [tst]
-            ctx = self._agent_context(goal, decisions)
-            plans = [a.plan("smoke_tests", ctx) for a in active]
-            self.logger.log("router_plans", mode=self.mode, step="smoke_tests", plans=[asdict(p) for p in plans])
-            for a in active:
-                ctx_phase = dict(ctx)
-                ctx_phase["phase"] = "smoke_tests"
-                refs = a.act(ctx_phase)
-                for r in refs:
-                    self._record_touched(r.path)
-                self.logger.log("agent_turn", agent=a.name, artifacts=[r.path for r in refs])
-            self._sync_checklist_state()
-            self._save_checklist()
-            results4 = runner.scan_and_run()
-            gate_results4 = evaluator.evaluate([g for g in gates if g.id in ('sg_smoke','sg_fe_scaffold','sg_be_scaffold','sg_api_contract')])
-            retries = 0
-            while not all(g.status == "passed" for g in gate_results4) and retries < 3:
-                self.logger.log("router_block", step="smoke_tests", reason="gate_failed", gates=[asdict(g) for g in gate_results4])
-                results4 = runner.scan_and_run()
-                gate_results4 = evaluator.evaluate([g for g in gates if g.id in ('sg_smoke','sg_fe_scaffold','sg_be_scaffold','sg_api_contract')])
-                retries += 1
-            plan_snapshots.append(
-                {
-                    "mode": self.mode,
-                    "step": "smoke_tests",
-                    "gates": [asdict(g) for g in gate_results4],
-                    "tests": [asdict(r) for r in (results + results2 + results3 + results4)],
-                }
-            )
-
-        elif self.mode == "tracks":
-            slice_active = [fe, be, llm, tst]
-            ctx = self._agent_context(goal, decisions)
-            plans = [a.plan("tracks", ctx) for a in slice_active]
-            self.logger.log("router_plans", mode=self.mode, step="slice-1", plans=[asdict(p) for p in plans])
-            for a in slice_active:
-                refs = a.act(ctx)
-                for r in refs:
-                    self._record_touched(r.path)
-                self.logger.log("agent_turn", agent=a.name, artifacts=[r.path for r in refs])
-            self._sync_checklist_state()
-            self._save_checklist()
-            results = runner.scan_and_run()
-            if any(a.needs_huddle(ctx) for a in slice_active):
-                hud = self._execute_huddle(
-                    topic=self._huddle_topic(goal),
-                    questions=["Resource fields?", "Endpoints & DTOs?", "Error model?"],
-                    proposed_contract=None,
-                    transcript=transcript,
-                    agents=agents,
-                    decisions_so_far=decisions,
-                )
-                decisions = hud.get("decisions", [])
-                transcript.add_decision_injection(decision_injection_text(decisions))
-            gate_results = evaluator.evaluate(gates)
-            plan_snapshots.append(
-                {
-                    "mode": self.mode,
-                    "step": "sync-1",
-                    "gates": [asdict(g) for g in gate_results],
-                    "tests": [asdict(r) for r in results],
-                }
-            )
-        else:
-            plan_graph.add_node(PlanNode(id="n_contracts", name="API contracts", modeSegment="critical"))
-            plan_graph.add_node(PlanNode(id="n_backend", name="Backend scaffold", modeSegment="critical"))
-            plan_graph.add_node(PlanNode(id="n_smoke", name="Smoke tests", modeSegment="critical"))
-            plan_graph.add_edge("n_contracts", "n_backend")
-            plan_graph.add_edge("n_backend", "n_smoke")
-
-            plan_graph.add_node(PlanNode(id="n_docs", name="Docs/README", modeSegment="docs"))
-
-            active_crit = [be, llm, tst]
-            ctx = self._agent_context(goal, decisions)
-            plans = [a.plan("contracts", ctx) for a in active_crit]
-            self.logger.log("router_plans", mode=self.mode, step="contracts", plans=[asdict(p) for p in plans])
-            for a in active_crit:
-                refs = a.act(ctx)
-                for r in refs:
-                    self._record_touched(r.path)
-                self.logger.log("agent_turn", agent=a.name, artifacts=[r.path for r in refs])
-            self._sync_checklist_state()
-            self._save_checklist()
-            try:
-                doc_out = llm._model([
-                    {"role": "system", "content": "You are the Docs agent. Write a concise README for the generated CLI app."},
-                    {"role": "user", "content": f"Goal: {goal}\n\nWrite a minimal README with: Overview, Quickstart, Commands, and Notes."},
-                ])
-            except ProviderError as e:
-                self.logger.log("docs_readme_failed", error=str(e))
-            else:
-                try:
-                    readme_art = self.artifacts.add_text("README.md", doc_out, tags=["docs", "readme"], meta={"segment": "docs"})
-                except OSError as e:
-                    self.logger.log("docs_readme_write_failed", error=str(e))
-                else:
-                    plan_graph.nodes[-1].evidence.append({"type": "artifact", "id": readme_art.path, "hash": f"sha256:{readme_art.sha256}"})
-                    self.logger.log("agent_turn", agent="docs", artifacts=[readme_art.path])
-
-            results = runner.scan_and_run()
-            if any(a.needs_huddle(ctx) for a in active_crit):
-                hud = self._execute_huddle(
-                    topic=self._huddle_topic(goal),
-                    questions=["Resource fields?", "Endpoints & DTOs?", "Error model?"],
-                    proposed_contract=None,
-                    transcript=transcript,
-                    agents=agents,
-                    decisions_so_far=decisions,
-                )
-                decisions = hud.get("decisions", [])
-                transcript.add_decision_injection(decision_injection_text(decisions))
-            gate_results = evaluator.evaluate([g for g in gates if g.id == 'sg_api_contract'])
-
-            sim_path = os.path.join(self.run_dir, "artifacts", "knowledge", "sim_update.json")
-            openapi_rel = os.path.join("artifacts", "contracts", "openapi.yaml")
-            openapi_abs = os.path.join(self.run_dir, openapi_rel)
-            if os.path.exists(openapi_abs) and (not os.path.exists(sim_path)):
-                try:
-                    os.makedirs(os.path.dirname(sim_path), exist_ok=True)
-                    with open(openapi_abs, "rb") as f:
-                        openapi_hash = hashlib.sha256(f.read()).hexdigest()
-                    with open(sim_path, "w", encoding="utf-8") as f:
-                        json.dump(
-                            {
-                                "source": "artifact",
-                                "refs": [{"type": "artifact", "id": openapi_rel, "hash": f"sha256:{openapi_hash}"}],
-                            },
-                            f,
-                            indent=2,
-                        )
-                except OSError as e:
-                    self.logger.log("knowledge_sim_update_write_failed", error=str(e))
-
-            try:
-                new_events = kbus.ingest_local_dropins()
-            except OSError as e:
-                self.logger.log("knowledge_dropins_read_failed", error=str(e))
-                new_events = []
-
-            if new_events:
-                plan_graph.add_reason("knowledge_update", f"{len(new_events)} new knowledge signal(s)")
-                self.logger.log("plan_switch", from_mode=self.mode, to_mode="weave", reason_type="knowledge_update", details=f"{len(new_events)} knowledge events", decisions=[d.id for d in decisions])
-                hud = self._execute_huddle(
-                    topic="Replan due to knowledge update",
-                    questions=["Do we need to adjust contracts or scaffolds?", "Any new risks from the evidence?"],
-                    proposed_contract=None,
-                    transcript=transcript,
-                    agents=agents,
-                    decisions_so_far=decisions,
-                )
-                new_ds = hud.get("decisions", [])
-                refs: List[Dict[str, Any]] = []
-                for ev in new_events:
-                    refs.extend(getattr(ev, "refs", []) or [])
-                for dsum in new_ds:
-                    if not getattr(dsum, "sources", None):
-                        dsum.sources = refs[:]
-                decisions = decisions + new_ds
-                transcript.add_decision_injection(decision_injection_text(decisions))
-
-            plan_snapshots.append(
-                {
-                    "mode": self.mode,
-                    "step": "contracts/weave_docs",
-                    "gates": [asdict(g) for g in gate_results],
-                    "tests": [asdict(r) for r in results],
-                }
-            )
-
-            active = [be, llm]
-            ctx = self._agent_context(goal, decisions)
-            plans2 = [a.plan("backend_scaffold", ctx) for a in active]
-            self.logger.log("router_plans", mode=self.mode, step="backend_scaffold", plans=[asdict(p) for p in plans2])
-            for a in active:
-                ctx_phase = dict(ctx)
-                ctx_phase["phase"] = "backend_scaffold"
-                refs = a.act(ctx_phase)
-                for r in refs:
-                    self._record_touched(r.path)
-                self.logger.log("agent_turn", agent=a.name, artifacts=[r.path for r in refs])
-            self._sync_checklist_state()
-            self._save_checklist()
-            results2 = runner.scan_and_run()
-            gate_results2 = evaluator.evaluate([g for g in gates if g.id in ('sg_api_contract','sg_be_scaffold')])
-            plan_snapshots.append(
-                {
-                    "mode": self.mode,
-                    "step": "backend_scaffold",
-                    "gates": [asdict(g) for g in gate_results2],
-                    "tests": [asdict(r) for r in (results + results2)],
-                }
-            )
-
-            active_fe = [fe]
-            ctx = self._agent_context(goal, decisions)
-            plans3 = [a.plan("frontend_scaffold", ctx) for a in active_fe]
-            self.logger.log("router_plans", mode=self.mode, step="frontend_scaffold", plans=[asdict(p) for p in plans3])
-            for a in active_fe:
-                ctx_phase = dict(ctx)
-                ctx_phase["phase"] = "frontend_scaffold"
-                refs = a.act(ctx_phase)
-                for r in refs:
-                    self._record_touched(r.path)
-                self.logger.log("agent_turn", agent=a.name, artifacts=[r.path for r in refs])
-            self._sync_checklist_state()
-            self._save_checklist()
-            results3 = runner.scan_and_run()
-            gate_results3 = evaluator.evaluate([g for g in gates if g.id in ('sg_fe_scaffold',)])
-
-            results4 = runner.scan_and_run()
-            gate_results4 = evaluator.evaluate([g for g in gates if g.id in ('sg_smoke','sg_fe_scaffold','sg_be_scaffold','sg_api_contract')])
-            plan_snapshots.append(
-                {
-                    "mode": self.mode,
-                    "step": "smoke_tests",
-                    "gates": [asdict(g) for g in gate_results4],
-                    "tests": [asdict(r) for r in (results + results2 + results3 + results4)],
-                }
-            )
+        result = mode_handler.execute(goal, transcript)
+        plan_snapshots = result.get("plan_snapshots") or []
+        decisions = result.get("decisions") or []
+        if isinstance(result.get("plan_graph"), PlanGraph):
+            plan_graph = result["plan_graph"]
 
         try:
             plan_graph.save(self.run_dir)
@@ -1275,21 +886,43 @@ class RouterRunner:
             self.logger.log("plan_snapshot_write_failed", error=str(e))
 
         try:
-            pre_results = runner.scan_and_run()
-            pre_gate_results = evaluator.evaluate(gates)
+            specs = mode_handler.runner.scan_specs()
+            if specs:
+                pre_results = mode_handler.runner.run_specs(
+                    specs,
+                    allow_commands=True,
+                    command_validator=mode_handler._validate_command,
+                )
+            else:
+                pre_results = mode_handler.runner.scan_and_run(
+                    allow_commands=True,
+                    command_validator=mode_handler._validate_command,
+                )
+            pre_gate_results = mode_handler.evaluator.evaluate(mode_handler.gates)
             self._latest_gate_results = pre_gate_results
             self.logger.log("pre_finalization_validation", tests=[asdict(r) for r in pre_results], gates=[asdict(g) for g in pre_gate_results])
         except Exception as e:
             self.logger.log("pre_finalization_error", error=str(e))
+        else:
+            self._sync_checklist_state()
+            self._save_checklist()
 
-        allowed, missing = self._finalization_allowed(evaluator, gates)
+        allowed, missing = self._finalization_allowed(mode_handler.evaluator, mode_handler.gates)
         if allowed:
-            final_report = run_finalization(self.run_dir, self.artifacts, self.logger, decisions, evaluator, workspace_root=self.cwd, run_started_at=self._workspace_baseline_at)
+            final_report = run_finalization(
+                self.run_dir,
+                self.artifacts,
+                self.logger,
+                decisions,
+                mode_handler.evaluator,
+                workspace_root=self.cwd,
+                run_started_at=self._workspace_baseline_at,
+            )
         else:
             final_report = {"error": "finalization_blocked", "missing": missing}
             self.logger.log("finalization_blocked", reason="guardrails_policy", missing=missing)
 
-        summary = self._build_summary(agents, evaluator, decisions)
+        summary = self._build_summary(mode_handler.agents, mode_handler.evaluator, decisions)
         final_report_rel = os.path.join("artifacts", "finalization", "report.json")
         if os.path.exists(os.path.join(self.run_dir, final_report_rel)):
             summary["finalization_report"] = final_report_rel
@@ -2383,24 +2016,8 @@ class RouterRunner:
                         q = tool_args.get("query") or ""
                         k = int(tool_args.get("top_k") or 5)
                         where = tool_args.get("where") if isinstance(tool_args, dict) else None
-                        hits = self.rag.search(q, top_k=k, where=(where if isinstance(where, dict) else None))
+                        hits = self.rag.search_rag(q, top_k=k, where=(where if isinstance(where, dict) else None))
                         self.logger.log("rag_search", role="router", q=q, top_k=k, hits=[h.get("doc_id") for h in hits])
-                        obs = {"hits": [
-                            {
-                                "doc_id": h.get("doc_id"),
-                                "score": h.get("score"),
-                                "path": h.get("path"),
-                                "tags": h.get("tags"),
-                                "meta": h.get("meta"),
-                                "snippet_or_path": (h.get("path") or h.get("snippet")),
-                            } for h in hits
-                        ]}
-                    elif tool_name == "semantic_search":
-                        q = tool_args.get("query") or ""
-                        k = int(tool_args.get("top_k") or 5)
-                        where = tool_args.get("where") if isinstance(tool_args, dict) else None
-                        hits = self.rag.search_semantic(q, top_k=k, where=(where if isinstance(where, dict) else None))
-                        self.logger.log("semantic_search", role="router", q=q, top_k=k, hits=[h.get("doc_id") for h in hits])
                         obs = {"hits": [
                             {
                                 "doc_id": h.get("doc_id"),

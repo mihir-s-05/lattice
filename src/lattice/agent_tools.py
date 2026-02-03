@@ -4,13 +4,13 @@ import fnmatch
 import hashlib
 import json
 import os
-import shlex
 import subprocess
 from typing import Any, Dict, List, Optional
 
 from .rag import RagIndex
 from .runlog import RunLogger
 from .config import RunConfig
+from .command_validation import command_is_dangerous, validate_command
 
 
 def _tool_schema(name: str, desc: str, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -73,30 +73,7 @@ def build_agent_tools_manifest() -> List[Dict[str, Any]]:
     ))
     tools.append(_tool_schema(
         "rag_search",
-        "Search the run-scoped index for relevant artifacts/transcripts.",
-        {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "top_k": {"type": "integer", "minimum": 1, "maximum": 20},
-                "where": {
-                    "type": ["object", "null"],
-                    "properties": {
-                        "doc_id_prefix": {"type": ["string", "null"]},
-                        "path_prefix": {"type": ["string", "null"]},
-                        "path_contains": {"type": ["string", "null"]},
-                        "tags_any": {"type": "array", "items": {"type": "string"}},
-                        "tags_all": {"type": "array", "items": {"type": "string"}},
-                        "kind": {"type": ["string", "null"]},
-                    },
-                },
-            },
-            "required": ["query", "top_k"],
-        },
-    ))
-    tools.append(_tool_schema(
-        "semantic_search",
-        "Semantic search over run-scoped artifacts/transcripts (includes huddle transcripts/summaries).",
+        "Keyword-based search (BM25) over run-scoped artifacts and transcripts.",
         {
             "type": "object",
             "properties": {
@@ -194,44 +171,26 @@ class AgentToolExecutor:
         return abs_path
 
     def _command_is_dangerous(self, cmd: str) -> bool:
-        txt = (cmd or "").lower()
-        dangerous = [
-            "rm -rf /",
-            "rm -fr /",
-            "mkfs",
-            "diskpart",
-            "format ",
-            "shutdown",
-            "reboot",
-        ]
-        return any(p in txt for p in dangerous)
+        return command_is_dangerous(cmd)
 
     def _validate_command(self, cmd: str) -> Optional[str]:
-        if not isinstance(cmd, str) or not cmd.strip():
-            return "command is required"
-        if self._command_is_dangerous(cmd):
-            return "command blocked: dangerous pattern"
         allow = list(getattr(self.cfg.command_policy, "allowlist", []) or [])
         deny = list(getattr(self.cfg.command_policy, "denylist", []) or [])
-        text = cmd.strip()
-        head = ""
-        try:
-            parts = shlex.split(text, posix=(os.name != "nt"))
-            head = (parts[0] if parts else "").lower()
-        except ValueError:
-            head = (text.split(" ")[0] if text else "").lower()
-        if deny:
-            for d in deny:
-                if d and d.lower() in text.lower():
-                    return "command blocked: denylist"
-        if allow:
-            if head and head not in {a.lower() for a in allow if a}:
-                return "command blocked: allowlist"
-        else:
-            default_allow = {"python", "py", "pytest", "pip", "pip3", "uv", "poetry", "npm", "node", "npx", "pnpm", "yarn", "git", "rg", "ruff", "black", "mypy", "echo", "dir", "type"}
-            if head and head not in default_allow:
-                return f"command blocked: not in default safe allowlist (head={head})"
-        return None
+        messages = {
+            "dangerous": "command blocked: dangerous pattern",
+            "denylist": "command blocked: denylist",
+            "allowlist": "command blocked: allowlist",
+            "default_allow": "command blocked: not in default safe allowlist (head={head})",
+        }
+        return validate_command(
+            cmd,
+            allowlist=allow,
+            denylist=deny,
+            require_command=True,
+            allowlist_prefix_match=False,
+            blocked_tokens=None,
+            messages=messages,
+        )
 
     def execute(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         if name == "read_file":
@@ -338,14 +297,7 @@ class AgentToolExecutor:
             q = str(args.get("query") or "")
             k = int(args.get("top_k") or 5)
             where = args.get("where") if isinstance(args, dict) else None
-            hits = self.rag.search(q, top_k=k, where=(where if isinstance(where, dict) else None))
-            return {"hits": hits}
-
-        if name == "semantic_search":
-            q = str(args.get("query") or "")
-            k = int(args.get("top_k") or 5)
-            where = args.get("where") if isinstance(args, dict) else None
-            hits = self.rag.search_semantic(q, top_k=k, where=(where if isinstance(where, dict) else None))
+            hits = self.rag.search_rag(q, top_k=k, where=(where if isinstance(where, dict) else None))
             return {"hits": hits}
 
         if name == "web_search":

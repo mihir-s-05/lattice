@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import random
+import warnings
 from typing import Any, Dict, List, Optional
 
 from .artifacts import ArtifactStore
@@ -18,6 +19,7 @@ from .worker import gen_run_id
 
 class SimplifiedRouter:
     def __init__(self, cwd: str, run_id: Optional[str] = None, mode: Optional[str] = None):
+        warnings.warn("SimplifiedRouter is deprecated; use RouterRunner", DeprecationWarning, stacklevel=2)
         self.cwd = cwd
         self.run_id = run_id or gen_run_id()
         self.run_dir = os.path.join(get_runs_base_dir(), self.run_id)

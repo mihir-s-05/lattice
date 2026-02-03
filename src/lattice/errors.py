@@ -67,11 +67,17 @@ def handle_provider_error(e: Exception, provider: str, attempts: int = 0) -> Pro
         "error_type": type(e).__name__
     }
     
-    if hasattr(e, "status_code"):
-        context["status_code"] = e.status_code
-    if hasattr(e, "response"):
-        context["response"] = str(e.response)[:500]
-    
+    status_code = getattr(e, "status_code", None)
+    if status_code is not None:
+        context["status_code"] = status_code
+
+    response = getattr(e, "response", None)
+    if response is not None:
+        context["response"] = str(response)[:500]
+        response_status_code = getattr(response, "status_code", None)
+        if response_status_code is not None:
+            context["status_code"] = response_status_code
+     
     return ProviderError(str(e), provider, attempts, context)
 
 

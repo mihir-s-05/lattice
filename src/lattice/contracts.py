@@ -57,6 +57,46 @@ def _validate_openapi_rough(text: str) -> Dict[str, Any]:
     return {"schema_valid": has_openapi and has_paths, "score": score}
 
 
+def _load_openapi_validator():
+    from openapi_spec_validator import validate_spec
+
+    return validate_spec
+
+
+def _validate_openapi(text: str) -> Dict[str, Any]:
+    base = dict(_validate_openapi_rough(text))
+    base.setdefault("validation_errors", [])
+    try:
+        import yaml
+
+        spec = yaml.safe_load(text)
+    except (yaml.YAMLError, ValueError, TypeError) as e:
+        base["method"] = "regex"
+        base["validation_errors"] = [{"type": type(e).__name__, "message": str(e)}]
+        return base
+
+    try:
+        validate_spec = _load_openapi_validator()
+    except ImportError as e:
+        base["method"] = "regex"
+        base["validation_errors"] = [{"type": type(e).__name__, "message": str(e)}]
+        return base
+
+    from openapi_spec_validator.exceptions import OpenAPIValidationError, OpenAPISpecValidatorError
+
+    try:
+        validate_spec(spec)
+        base["schema_valid"] = True
+        base["method"] = "openapi-spec-validator"
+        base["validation_errors"] = []
+        return base
+    except (OpenAPIValidationError, OpenAPISpecValidatorError, ValueError, TypeError) as e:
+        base["schema_valid"] = False
+        base["method"] = "openapi-spec-validator"
+        base["validation_errors"] = [{"type": type(e).__name__, "message": str(e)}]
+        return base
+
+
 class ContractRunner:
     def __init__(
         self,
@@ -407,12 +447,12 @@ class ContractRunner:
                 else:
                     with open(abs_path, "r", encoding="utf-8", errors="ignore") as f:
                         text = f.read(256_000)
-                    m = _validate_openapi_rough(text)
+                    m = _validate_openapi(text)
                     metrics.update(m)
                     if m.get("schema_valid"):
                         status = "passed"
                     else:
-                        evidence.append({"path": spec_rel, "message": "heuristic validation failed"})
+                        evidence.append({"path": spec_rel, "message": "OpenAPI validation failed", "method": m.get("method"), "validation_errors": m.get("validation_errors")})
             elif ttype in ("consistency", "api_consistency"):
                 if spec.get("canonical") or spec.get("other_paths"):
                     canonical_path = str(spec.get("canonical") or "")

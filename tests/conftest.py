@@ -1,8 +1,9 @@
 import os
+
 import json
 import tempfile
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, create_autospec
 
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
@@ -21,7 +22,9 @@ def tmp_run_dir(tmp_path):
 
 @pytest.fixture
 def mock_logger():
-    logger = MagicMock()
+    from lattice.runlog import RunLogger
+
+    logger = create_autospec(RunLogger, instance=True, spec_set=True)
     logger.log = MagicMock()
     logger.path = MagicMock(return_value="/fake/path/run.jsonl")
     return logger

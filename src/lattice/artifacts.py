@@ -15,6 +15,16 @@ def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
+def _path_for_containment_check(path: str) -> str:
+    path = os.path.normcase(path)
+    if os.name == "nt":
+        if path.startswith("\\\\?\\UNC\\"):
+            path = "\\\\" + path[len("\\\\?\\UNC\\") :]
+        elif path.startswith("\\\\?\\"):
+            path = path[len("\\\\?\\") :]
+    return os.path.normpath(path)
+
+
 @dataclass
 class Artifact:
     id: str
@@ -53,15 +63,17 @@ class ArtifactStore:
 
     def _artifact_abspath(self, filename: str) -> str:
         rel = self._normalize_relpath(filename)
-        base = os.path.normcase(os.path.realpath(self.art_dir))
-        abs_path = os.path.normcase(os.path.realpath(os.path.join(self.art_dir, rel)))
+        base_real = os.path.realpath(self.art_dir)
+        abs_real = os.path.realpath(os.path.join(self.art_dir, rel))
+        base = _path_for_containment_check(base_real)
+        abs_path = _path_for_containment_check(abs_real)
         try:
             within = os.path.commonpath([base, abs_path]) == base
         except ValueError:
             within = abs_path == base or abs_path.startswith(base + os.sep)
         if not within:
             raise ValueError("artifact path escapes artifacts directory")
-        return abs_path
+        return abs_real
 
     def _load_index(self) -> Dict[str, Any]:
         try:

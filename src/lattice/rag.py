@@ -1,10 +1,11 @@
+from __future__ import annotations
+
 import json
 import math
 import os
 import re
 import threading
-import hashlib
-from collections import Counter, defaultdict
+from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 from .constants import (
     DEFAULT_RAG_TOKEN_LIMIT,
@@ -14,11 +15,163 @@ from .constants import (
 )
 
 
-WORD_RE = re.compile(r"[A-Za-z0-9_]+")
+_RAW_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+(?:[./:-][A-Za-z0-9_]+)+|[A-Za-z0-9_]+")
+_SEP_RE = re.compile(r"[./:-]+")
+_CAMEL_1 = re.compile(r"([a-z0-9])([A-Z])")
+_CAMEL_2 = re.compile(r"([A-Z]+)([A-Z][a-z])")
+
+_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "but",
+    "by",
+    "for",
+    "from",
+    "has",
+    "have",
+    "if",
+    "in",
+    "into",
+    "is",
+    "it",
+    "no",
+    "not",
+    "of",
+    "on",
+    "or",
+    "s",
+    "such",
+    "t",
+    "that",
+    "the",
+    "their",
+    "then",
+    "there",
+    "these",
+    "they",
+    "this",
+    "to",
+    "was",
+    "were",
+    "will",
+    "with",
+    "you",
+    "your",
+    "self",
+    "cls",
+    "args",
+    "kwargs",
+    "true",
+    "false",
+    "none",
+    "null",
+    "def",
+    "class",
+    "return",
+    "import",
+    "export",
+    "public",
+    "private",
+    "protected",
+    "static",
+    "async",
+    "await",
+    "let",
+    "const",
+    "var",
+    "function",
+    "try",
+    "except",
+    "catch",
+    "finally",
+    "raise",
+    "throw",
+    "new",
+    "pass",
+    "break",
+    "continue",
+    "elif",
+    "else",
+    "while",
+    "for",
+    "in",
+    "with",
+    "lambda",
+    "yield",
+    "print",
+    "console",
+    "log",
+}
+
+
+def _split_camel(piece: str) -> List[str]:
+    if not piece:
+        return []
+    s = _CAMEL_2.sub(r"\1 \2", piece)
+    s = _CAMEL_1.sub(r"\1 \2", s)
+    return [p for p in s.split() if p]
+
+
+def _keep_token(tok: str) -> bool:
+    if not tok:
+        return False
+    t = tok.strip().lower()
+    if not t:
+        return False
+    if t in _STOPWORDS:
+        return False
+    if t.isdigit():
+        return False
+    if len(t) <= 1:
+        return False
+    if len(t) > 64:
+        return False
+    return True
 
 
 def tokenize(text: str) -> List[str]:
-    return [t.lower() for t in WORD_RE.findall(text)]
+    """
+    Code-aware-ish tokenizer for lightweight retrieval:
+    - Keeps dotted/slashed identifiers (e.g., self.cfg, app.route, HTTP/1.1) as tokens
+    - Also emits subtokens via separator split + snake_case + camelCase splitting
+    - Filters obvious stopwords / boilerplate tokens
+
+    This is intentionally dependency-free and optimized for small run-scoped corpora.
+    """
+    raw = _RAW_TOKEN_RE.findall(text or "")
+    out: List[str] = []
+    for rt in raw:
+        emitted: set[str] = set()
+
+        rt_l = rt.lower()
+        emitted.add(rt_l)
+
+        stripped = rt_l.strip("_.:-/")
+        if stripped:
+            emitted.add(stripped)
+
+        for part in _SEP_RE.split(rt):
+            if not part:
+                continue
+            emitted.add(part.lower())
+            for snake in part.split("_"):
+                if not snake:
+                    continue
+                emitted.add(snake.lower())
+                for cc in _split_camel(snake):
+                    emitted.add(cc.lower())
+            for cc in _split_camel(part):
+                emitted.add(cc.lower())
+
+        for t in emitted:
+            if _keep_token(t):
+                out.append(t.lower())
+    return out
 
 
 class RagIndex:
@@ -27,12 +180,8 @@ class RagIndex:
         self.idx_path = os.path.join(run_dir, "rag_index.json")
         self._lock = threading.Lock()
         self.docs: Dict[str, Dict[str, Any]] = {}
-        self.vocab: Dict[str, int] = {}
-        self.idf: Dict[int, float] = {}
-        self.doc_vectors: Dict[str, Dict[int, float]] = {}
-        self.semantic_dim: int = 128
-        self.doc_semantic_vectors: Dict[str, List[float]] = {}
-        self.loaded = False
+        self.df: Dict[str, int] = {}
+        self._avgdl: float = 0.0
         if os.path.exists(self.idx_path):
             self._load()
 
@@ -46,127 +195,128 @@ class RagIndex:
                 if isinstance(doc, dict):
                     doc.setdefault("tags", [])
                     doc.setdefault("meta", {})
-            self.vocab = {k: int(v) for k, v in data.get("vocab", {}).items()}
-            self.idf = {int(k): float(v) for k, v in data.get("idf", {}).items()}
-            self.doc_vectors = {
-                doc_id: {int(i): float(w) for i, w in vec.items()} for doc_id, vec in data.get("doc_vectors", {}).items()
-            }
-            self.semantic_dim = int(data.get("semantic_dim") or self.semantic_dim)
-            sem = data.get("doc_semantic_vectors") or {}
-            if isinstance(sem, dict):
-                self.doc_semantic_vectors = {
-                    str(doc_id): [float(x) for x in (vec or [])] for doc_id, vec in sem.items() if isinstance(vec, list)
-                }
-            self.loaded = True
+
+            df = data.get("df")
+            if isinstance(df, dict):
+                self.df = {str(k): int(v) for k, v in df.items() if isinstance(k, str) or isinstance(k, int)}
+            else:
+                self.df = {}
+
+            for doc_id, doc in list(self.docs.items()):
+                if not isinstance(doc, dict):
+                    continue
+                if isinstance(doc.get("tf"), dict):
+                    continue
+                toks = doc.get("tokens") or []
+                if not isinstance(toks, list):
+                    toks = []
+                tf = Counter([str(t).lower() for t in toks if isinstance(t, str)])
+                doc["tf"] = dict(tf)
+                doc["dl"] = int(doc.get("dl") or len(toks))
+
+            if not self.df:
+                self._rebuild_df()
+            self._recompute_avgdl()
 
     def _save(self) -> None:
         data = {
             "docs": self.docs,
-            "vocab": {k: v for k, v in self.vocab.items()},
-            "idf": {str(k): v for k, v in self.idf.items()},
-            "doc_vectors": {doc_id: {str(i): w for i, w in vec.items()} for doc_id, vec in self.doc_vectors.items()},
-            "semantic_dim": self.semantic_dim,
-            "doc_semantic_vectors": {doc_id: vec for doc_id, vec in self.doc_semantic_vectors.items()},
+            "df": self.df,
+            "avgdl": self._avgdl,
+            "version": 2,
         }
         with self._lock:
             with open(self.idx_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
 
-    def _recompute_idf(self) -> None:
-        N = max(1, len(self.docs))
-        df: Dict[int, int] = defaultdict(int)
+    def _recompute_avgdl(self) -> None:
+        total = 0
+        n = 0
         for doc in self.docs.values():
-            terms = set(doc.get("tokens", []))
+            if not isinstance(doc, dict):
+                continue
+            dl = int(doc.get("dl") or 0)
+            if dl <= 0:
+                toks = doc.get("tokens") or []
+                dl = len(toks) if isinstance(toks, list) else 0
+            if dl <= 0:
+                continue
+            total += dl
+            n += 1
+        self._avgdl = (float(total) / float(n)) if n else 0.0
+
+    def _rebuild_df(self) -> None:
+        df: Dict[str, int] = {}
+        for doc in self.docs.values():
+            if not isinstance(doc, dict):
+                continue
+            tf = doc.get("tf")
+            if not isinstance(tf, dict):
+                toks = doc.get("tokens") or []
+                if isinstance(toks, list):
+                    tf = dict(Counter([str(t).lower() for t in toks if isinstance(t, str)]))
+                else:
+                    tf = {}
+                doc["tf"] = tf
+            terms = set([str(t).lower() for t in tf.keys()])
             for t in terms:
-                idx = self.vocab.setdefault(t, len(self.vocab))
-                df[idx] += 1
-        self.idf = {}
-        for t, idx in self.vocab.items():
-            dfi = df.get(idx, 0)
-            self.idf[idx] = math.log((N + 1) / (dfi + 1)) + 1.0
+                df[t] = df.get(t, 0) + 1
+        self.df = df
 
-    def _tfidf(self, tokens: List[str]) -> Dict[int, float]:
-        counts = Counter(tokens)
-        vec: Dict[int, float] = {}
-        if not counts:
-            return vec
-        max_tf = max(counts.values())
-        for t, tf in counts.items():
-            idx = self.vocab.setdefault(t, len(self.vocab))
-            tf_norm = 0.5 + 0.5 * (tf / max_tf)
-            idf = self.idf.get(idx, 1.0)
-            vec[idx] = tf_norm * idf
-        return vec
+    def _bm25_idf(self, term: str, *, N: int) -> float:
+        df = int(self.df.get(term, 0))
+        return math.log(((N - df + 0.5) / (df + 0.5)) + 1.0)
 
-    def _cosine(self, a: Dict[int, float], b: Dict[int, float]) -> float:
-        if not a or not b:
+    def _bm25_score(self, doc_tf: Dict[str, int], doc_len: int, query_terms: List[str], *, k1: float, b: float, N: int) -> float:
+        if not query_terms or not doc_tf:
             return 0.0
-        dot = 0.0
-        if len(a) < len(b):
-            small, large = a, b
-        else:
-            small, large = b, a
-        for i, w in small.items():
-            bw = large.get(i)
-            if bw is not None:
-                dot += w * bw
-        na = math.sqrt(sum(w * w for w in a.values()))
-        nb = math.sqrt(sum(w * w for w in b.values()))
-        if na == 0 or nb == 0:
-            return 0.0
-        return dot / (na * nb)
-
-    def _semantic_vec(self, tokens: List[str]) -> List[float]:
-        if not tokens:
-            return [0.0] * self.semantic_dim
-        vec = [0.0] * self.semantic_dim
-        for t in tokens:
-            h = hashlib.md5(t.encode("utf-8")).digest()
-            idx = int.from_bytes(h[:2], "big") % self.semantic_dim
-            sign = -1.0 if (h[2] & 1) else 1.0
-            vec[idx] += sign
-        norm = math.sqrt(sum(x * x for x in vec))
-        if norm > 0:
-            vec = [x / norm for x in vec]
-        return vec
-
-    def _cosine_dense(self, a: List[float], b: List[float]) -> float:
-        if not a or not b:
-            return 0.0
-        n = min(len(a), len(b))
-        if n == 0:
-            return 0.0
-        dot = 0.0
-        na = 0.0
-        nb = 0.0
-        for i in range(n):
-            av = float(a[i])
-            bv = float(b[i])
-            dot += av * bv
-            na += av * av
-            nb += bv * bv
-        if na == 0.0 or nb == 0.0:
-            return 0.0
-        return dot / math.sqrt(na * nb)
+        avgdl = self._avgdl or 1.0
+        denom_norm = (1.0 - b) + b * (float(doc_len) / float(avgdl))
+        score = 0.0
+        for t in query_terms:
+            tf = int(doc_tf.get(t, 0))
+            if tf <= 0:
+                continue
+            idf = self._bm25_idf(t, N=N)
+            numer = float(tf) * (k1 + 1.0)
+            denom = float(tf) + k1 * denom_norm
+            score += idf * (numer / denom)
+        return score
 
     def ingest_text(self, doc_id: str, text: str, path: str, *, tags: Optional[List[str]] = None, meta: Optional[Dict[str, Any]] = None) -> None:
         tokens = tokenize(text)
         limited_tokens = tokens[:DEFAULT_RAG_TOKEN_LIMIT]
+        tf = Counter(limited_tokens)
+        unique_terms = set(tf.keys())
         with self._lock:
+            prev = self.docs.get(doc_id)
+            if isinstance(prev, dict):
+                prev_tf = prev.get("tf")
+                if isinstance(prev_tf, dict):
+                    prev_terms = set([str(t).lower() for t in prev_tf.keys()])
+                else:
+                    prev_tokens = prev.get("tokens") or []
+                    prev_terms = set([str(t).lower() for t in prev_tokens]) if isinstance(prev_tokens, list) else set()
+                for t in prev_terms:
+                    cur = int(self.df.get(t, 0)) - 1
+                    if cur <= 0:
+                        self.df.pop(t, None)
+                    else:
+                        self.df[t] = cur
+
             self.docs[doc_id] = {
                 "path": path,
                 "tokens": limited_tokens,
                 "snippet": text[:DEFAULT_RAG_SNIPPET_LENGTH],
                 "tags": [str(t) for t in (tags or []) if str(t).strip()],
                 "meta": (meta or {}),
+                "tf": dict(tf),
+                "dl": len(limited_tokens),
             }
-            self._recompute_idf()
-            self.doc_vectors[doc_id] = self._tfidf(limited_tokens)
-            self.doc_semantic_vectors[doc_id] = self._semantic_vec(limited_tokens)
-        try:
-            self._save()
-        except OSError:
-            return
+            for t in unique_terms:
+                self.df[t] = int(self.df.get(t, 0)) + 1
+            self._recompute_avgdl()
+        self._save()
 
     def _matches_where(self, doc_id: str, meta: Dict[str, Any], where: Optional[Dict[str, Any]]) -> bool:
         if not where:
@@ -213,14 +363,29 @@ class RagIndex:
 
     def search(self, query: str, top_k: int = DEFAULT_RAG_TOP_K, where: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         tokens = tokenize(query)
-        qvec = self._tfidf(tokens)
+        qterms = [t for t in tokens if _keep_token(t)]
+        if not qterms:
+            return []
+        N = max(1, len(self.docs))
+        k1 = 1.2
+        b = 0.75
+
         scored: List[Tuple[str, float]] = []
-        for doc_id, dvec in self.doc_vectors.items():
-            if not self._matches_where(doc_id, self.docs.get(doc_id, {}), where):
+        for doc_id, doc in self.docs.items():
+            if not self._matches_where(doc_id, doc if isinstance(doc, dict) else {}, where):
                 continue
-            s = self._cosine(qvec, dvec)
-            if s > 0:
-                scored.append((doc_id, s))
+            if not isinstance(doc, dict):
+                continue
+            doc_tf = doc.get("tf")
+            if not isinstance(doc_tf, dict):
+                continue
+            dl = int(doc.get("dl") or 0)
+            if dl <= 0:
+                dl = len(doc.get("tokens") or []) if isinstance(doc.get("tokens"), list) else 0
+            score = self._bm25_score(doc_tf, dl, qterms, k1=k1, b=b, N=N)
+            if score > 0:
+                scored.append((doc_id, score))
+
         scored.sort(key=lambda x: x[1], reverse=True)
         out: List[Dict[str, Any]] = []
         for doc_id, score in scored[:top_k]:
@@ -232,31 +397,20 @@ class RagIndex:
                 "snippet": meta.get("snippet"),
                 "tags": meta.get("tags"),
                 "meta": meta.get("meta"),
+                "mode": "bm25",
             })
         return out
 
+    def search_rag(self, query: str, top_k: int = DEFAULT_RAG_TOP_K, where: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        out = self.search(query, top_k=top_k, where=where)
+        for r in out:
+            r["mode"] = "bm25"
+        return out
+
     def search_semantic(self, query: str, top_k: int = DEFAULT_RAG_TOP_K, where: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-        tokens = tokenize(query)
-        qvec = self._semantic_vec(tokens)
-        scored: List[Tuple[str, float]] = []
-        for doc_id, dvec in self.doc_semantic_vectors.items():
-            if not self._matches_where(doc_id, self.docs.get(doc_id, {}), where):
-                continue
-            s = self._cosine_dense(qvec, dvec)
-            if s > 0:
-                scored.append((doc_id, s))
-        scored.sort(key=lambda x: x[1], reverse=True)
-        out: List[Dict[str, Any]] = []
-        for doc_id, score in scored[:top_k]:
-            meta = self.docs.get(doc_id, {})
-            out.append({
-                "doc_id": doc_id,
-                "score": score,
-                "path": meta.get("path"),
-                "snippet": meta.get("snippet"),
-                "tags": meta.get("tags"),
-                "meta": meta.get("meta"),
-            })
+        out = self.search_rag(query, top_k=top_k, where=where)
+        for r in out:
+            r["note"] = "semantic_search_deprecated; using rag_search"
         return out
 
     def ingest_file(self, path: str, doc_id: str, max_bytes: int = DEFAULT_RAG_MAX_FILE_SIZE, *, tags: Optional[List[str]] = None, meta: Optional[Dict[str, Any]] = None) -> None:

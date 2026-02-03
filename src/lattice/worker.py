@@ -3,6 +3,7 @@ import os
 import random
 import string
 from datetime import datetime
+from datetime import timezone
 import hashlib
 import glob
 from typing import Dict, Optional, List, Any
@@ -30,7 +31,7 @@ from .constants import (
 
 
 def gen_run_id() -> str:
-    ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
     return f"run-{ts}-{suffix}"
 

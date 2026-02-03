@@ -190,7 +190,7 @@ class BaseAgent:
         - on-demand huddle requests (request_huddle tool)
         - workspace IO (read_file/write_file)
         - safe command execution (run_command)
-        - retrieval (rag_search / semantic_search)
+        - retrieval (rag_search)
 
         If tool calling is not supported by the provider, falls back to a plain model call.
         """
@@ -352,16 +352,57 @@ class BaseAgent:
         self.logger.log("rag_ingest_agent", agent=self.name, doc_id=doc_id, path=abs_path)
         return ref
 
+    def _parse_and_write_fenced_files(self, text: str, default_dir: str) -> List[ArtifactRef]:
+        import re
+
+        if not isinstance(text, str) or "```" not in text:
+            return []
+
+        def _extract_path(info: str) -> Optional[str]:
+            s = (info or "").strip()
+            if not s:
+                return None
+            m = re.search(r"(?:file|path)[:=](\S+)", s, flags=re.IGNORECASE)
+            if m:
+                return m.group(1)
+            parts = s.split()
+            if len(parts) >= 2 and parts[0].lower() in ("file", "path"):
+                return parts[1]
+            exts = (".py", ".js", ".ts", ".css", ".html", ".md", ".json", ".yaml", ".yml", ".txt")
+            for p in parts:
+                pl = p.lower().strip("\"'")
+                if pl.endswith(exts) or ("/" in p) or ("\\" in p):
+                    return p
+            return None
+
+        def _normalize_path(raw: str) -> Optional[str]:
+            p = str(raw or "").strip().strip("\"'")
+            if not p:
+                return None
+            p = p.replace("\\", "/")
+            if p.startswith("/") or re.match(r"^[a-zA-Z]:", p):
+                return None
+            if any(seg == ".." for seg in p.split("/") if seg):
+                return None
+            if default_dir and ("/" not in p):
+                p = f"{default_dir.strip().rstrip('/')}/{p}"
+            return p
+
+        fence_re = re.compile(r"```([^\n`]*)\n(.*?)```", flags=re.DOTALL)
+        refs: List[ArtifactRef] = []
+        for m in fence_re.finditer(text):
+            info = (m.group(1) or "").strip()
+            body = m.group(2) if m.group(2) is not None else ""
+            path = _normalize_path(_extract_path(info) or "")
+            if not path:
+                continue
+            refs.append(self._write_artifact(path, body, tags=[self.name, "generated"]))
+        return refs
+
     def _rag_search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        hits = self.rag.search(query, top_k=top_k)
+        hits = self.rag.search_rag(query, top_k=top_k)
         self._rag_queries.append({"q": query, "top_k": top_k, "hits": [h.get("doc_id") for h in hits]})
         self.logger.log("rag_search", agent=self.name, q=query, top_k=top_k, hits=[h.get("doc_id") for h in hits])
-        return hits
-
-    def _rag_search_semantic(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        hits = self.rag.search_semantic(query, top_k=top_k)
-        self._rag_queries.append({"q": query, "top_k": top_k, "hits": [h.get("doc_id") for h in hits], "mode": "semantic"})
-        self.logger.log("semantic_search", agent=self.name, q=query, top_k=top_k, hits=[h.get("doc_id") for h in hits])
         return hits
 
     def _checklist_prompt(self, inputs: Dict[str, Any]) -> str:
@@ -401,7 +442,7 @@ class FrontendAgent(BaseAgent):
         if (not is_planning) and is_build:
             plan = AgentPlan(
                 step="fe_scaffold",
-                description="Implement a minimal animated landing page + contact form",
+                description="Implement a minimal frontend scaffold aligned to the contract",
                 contracts=[],
             )
         else:
@@ -421,435 +462,30 @@ class FrontendAgent(BaseAgent):
         checklist = self._checklist_prompt(inputs)
         mode = getattr(self._last_plan, "step", "fe_wireframes") if self._last_plan else "fe_wireframes"
         if mode == "fe_scaffold":
-            html = """<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <meta name="theme-color" content="#0b1020" />
-    <title>NovaFlow — ship better, faster</title>
-    <link rel="stylesheet" href="./styles.css" />
-  </head>
-  <body>
-    <div class="bg" aria-hidden="true">
-      <div class="orb orb-a"></div>
-      <div class="orb orb-b"></div>
-      <div class="grid"></div>
-    </div>
-
-    <header class="header">
-      <a class="brand" href="#top" aria-label="NovaFlow home">
-        <span class="brand-mark" aria-hidden="true"></span>
-        <span class="brand-name">NovaFlow</span>
-      </a>
-      <nav class="nav" aria-label="Primary">
-        <a href="#features">Features</a>
-        <a href="#security">Security</a>
-        <a class="btn btn-ghost" href="#contact">Contact</a>
-      </nav>
-    </header>
-
-    <main id="top" class="main">
-      <section class="hero">
-        <div class="hero-copy">
-          <p class="pill" data-animate>Animated SaaS landing page • minimal API</p>
-          <h1 class="headline" data-animate>Make every release feel effortless.</h1>
-          <p class="subhead" data-animate>
-            NovaFlow gives your team a calm, fast path from idea → shipped. Beautiful UX, smooth motion, and a contact flow
-            that actually works.
-          </p>
-          <div class="hero-cta" data-animate>
-            <a class="btn" href="#contact">Request a demo</a>
-            <a class="btn btn-ghost" href="#features">See features</a>
-          </div>
-          <div class="stats" data-animate>
-            <div class="stat"><span class="stat-n">2.3×</span><span class="stat-l">faster cycles</span></div>
-            <div class="stat"><span class="stat-n">99.9%</span><span class="stat-l">uptime targets</span></div>
-            <div class="stat"><span class="stat-n">1</span><span class="stat-l">simple API</span></div>
-          </div>
-        </div>
-
-        <div class="hero-card" data-animate>
-          <div class="card-top">
-            <div class="card-dot"></div><div class="card-dot"></div><div class="card-dot"></div>
-          </div>
-          <div class="card-body">
-            <div class="card-row shimmer"></div>
-            <div class="card-row shimmer w-80"></div>
-            <div class="card-row shimmer w-60"></div>
-            <div class="card-row chart">
-              <div class="bar" style="--h: 30%"></div>
-              <div class="bar" style="--h: 65%"></div>
-              <div class="bar" style="--h: 42%"></div>
-              <div class="bar" style="--h: 78%"></div>
-              <div class="bar" style="--h: 56%"></div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section id="features" class="section">
-        <h2 class="h2" data-animate>Built for focus</h2>
-        <p class="p" data-animate>Motion that guides. Interfaces that breathe. A workflow your team can trust.</p>
-        <div class="cards">
-          <article class="card" data-animate>
-            <h3>Guided pipelines</h3>
-            <p>Turn messy work into clear stages. Ship with confidence and fewer surprises.</p>
-          </article>
-          <article class="card" data-animate>
-            <h3>Delightful motion</h3>
-            <p>Micro-interactions that feel premium—without the performance penalty.</p>
-          </article>
-          <article class="card" data-animate>
-            <h3>Fast contact flow</h3>
-            <p>A real POST /contact endpoint with validation and clean JSON responses.</p>
-          </article>
-        </div>
-      </section>
-
-      <section id="security" class="section">
-        <h2 class="h2" data-animate>Secure by default</h2>
-        <div class="split">
-          <div class="panel" data-animate>
-            <h3>Simple surface area</h3>
-            <p>Keep the API minimal. Add more later—only when you need it.</p>
-            <ul class="list">
-              <li>Input validation</li>
-              <li>Basic rate limiting</li>
-              <li>CORS headers for local dev</li>
-            </ul>
-          </div>
-          <div class="panel panel-accent" data-animate>
-            <h3>Operational clarity</h3>
-            <p>Readable logs, deterministic behavior, and a smoke script to validate end-to-end.</p>
-            <p class="muted">Tip: set <code>API_BASE_URL</code> in <code>frontend/app.js</code> if your API is hosted elsewhere.</p>
-          </div>
-        </div>
-      </section>
-
-      <section id="contact" class="section">
-        <h2 class="h2" data-animate>Contact</h2>
-        <p class="p" data-animate>Send a note—we’ll reply quickly.</p>
-
-        <form id="contactForm" class="form" novalidate>
-          <label class="field">
-            <span>Name</span>
-            <input name="name" autocomplete="name" required maxlength="100" />
-          </label>
-          <label class="field">
-            <span>Email</span>
-            <input name="email" type="email" autocomplete="email" required maxlength="254" />
-          </label>
-          <label class="field">
-            <span>Message</span>
-            <textarea name="message" required maxlength="2000" rows="5"></textarea>
-          </label>
-          <div class="form-row">
-            <button class="btn" type="submit">Send</button>
-            <div id="formStatus" class="status" role="status" aria-live="polite"></div>
-          </div>
-        </form>
-      </section>
-
-      <footer class="footer">
-        <span>© <span id="year"></span> NovaFlow</span>
-        <a href="#top">Back to top</a>
-      </footer>
-    </main>
-
-    <script src="./app.js"></script>
-  </body>
-</html>
-"""
-            css = """:root{
-  --bg:#0b1020;
-  --fg:#eaf0ff;
-  --muted:#a9b6d6;
-  --card:rgba(255,255,255,.06);
-  --accent:#8b5cf6;
-  --accent2:#22d3ee;
-  --shadow: 0 22px 70px rgba(0,0,0,.35);
-}
-*{box-sizing:border-box}
-html,body{height:100%}
-body{
-  margin:0;
-  font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, \"Apple Color Emoji\",\"Segoe UI Emoji\";
-  color:var(--fg);
-  background: radial-gradient(1200px 700px at 20% 10%, rgba(139,92,246,.25), transparent 60%),
-              radial-gradient(1000px 700px at 80% 20%, rgba(34,211,238,.18), transparent 55%),
-              var(--bg);
-  overflow-x:hidden;
-}
-code{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace}
-a{color:inherit;text-decoration:none}
-.bg{position:fixed;inset:0;pointer-events:none;z-index:-1}
-.grid{
-  position:absolute;inset:-20%;
-  background-image: linear-gradient(rgba(255,255,255,.06) 1px, transparent 1px),
-                    linear-gradient(90deg, rgba(255,255,255,.06) 1px, transparent 1px);
-  background-size: 72px 72px;
-  transform: perspective(900px) rotateX(55deg) translateY(-10%);
-  opacity:.18;
-}
-.orb{position:absolute;filter:blur(40px);opacity:.8;mix-blend-mode:screen}
-.orb-a{width:520px;height:520px;left:-120px;top:-120px;background:radial-gradient(circle at 30% 30%, rgba(139,92,246,.9), transparent 60%);animation: float 9s ease-in-out infinite}
-.orb-b{width:520px;height:520px;right:-160px;top:40px;background:radial-gradient(circle at 30% 30%, rgba(34,211,238,.85), transparent 60%);animation: float 11s ease-in-out infinite reverse}
-@keyframes float{0%,100%{transform:translate3d(0,0,0)}50%{transform:translate3d(0,24px,0)}}
-
-.header{
-  position:sticky;top:0;z-index:10;
-  display:flex;align-items:center;justify-content:space-between;
-  padding: 14px 20px;
-  background: rgba(11,16,32,.55);
-  backdrop-filter: blur(10px);
-  border-bottom:1px solid rgba(255,255,255,.08);
-}
-.brand{display:flex;gap:10px;align-items:center;font-weight:700;letter-spacing:.2px}
-.brand-mark{
-  width:14px;height:14px;border-radius:6px;
-  background: linear-gradient(135deg,var(--accent),var(--accent2));
-  box-shadow: 0 0 0 6px rgba(139,92,246,.18);
-}
-.nav{display:flex;gap:14px;align-items:center}
-.nav a{opacity:.9}
-.nav a:hover{opacity:1}
-
-.main{max-width:1100px;margin:0 auto;padding: 0 20px 48px}
-.hero{
-  display:grid;
-  grid-template-columns: 1.05fr .95fr;
-  gap: 26px;
-  padding: 54px 0 30px;
-  align-items:center;
-}
-.pill{
-  display:inline-flex;align-items:center;gap:10px;
-  padding: 7px 12px;border-radius:999px;
-  background: rgba(255,255,255,.06);
-  border:1px solid rgba(255,255,255,.10);
-  color: var(--muted);
-}
-.headline{font-size: clamp(2.1rem, 4vw, 3.3rem);line-height:1.08;margin: 14px 0 10px}
-.subhead{color:var(--muted);max-width: 52ch;margin: 0 0 18px}
-.hero-cta{display:flex;gap:12px;flex-wrap:wrap;margin: 8px 0 16px}
-.btn{
-  display:inline-flex;align-items:center;justify-content:center;
-  padding: 10px 14px;border-radius: 12px;
-  background: linear-gradient(135deg,var(--accent),var(--accent2));
-  color:#071024;font-weight:700;border:0;
-  box-shadow: 0 12px 30px rgba(34,211,238,.16);
-  transition: transform .18s ease, filter .18s ease;
-}
-.btn:hover{transform: translateY(-1px);filter:saturate(1.06)}
-.btn:active{transform: translateY(0)}
-.btn-ghost{
-  background: rgba(255,255,255,.06);
-  border:1px solid rgba(255,255,255,.14);
-  box-shadow:none;color:var(--fg);font-weight:600
-}
-.btn-ghost:hover{background: rgba(255,255,255,.09)}
-
-.stats{display:flex;gap:14px;flex-wrap:wrap}
-.stat{padding:10px 12px;border-radius: 14px;background: var(--card);border:1px solid rgba(255,255,255,.10)}
-.stat-n{display:block;font-weight:800;font-size:1.05rem}
-.stat-l{display:block;color:var(--muted);font-size:.9rem}
-
-.hero-card{
-  border-radius: 18px;
-  background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.04));
-  border:1px solid rgba(255,255,255,.12);
-  box-shadow: var(--shadow);
-  overflow:hidden;
-}
-.card-top{display:flex;gap:8px;padding: 12px 14px;border-bottom:1px solid rgba(255,255,255,.08);background: rgba(0,0,0,.18)}
-.card-dot{width:10px;height:10px;border-radius:99px;background: rgba(255,255,255,.22)}
-.card-body{padding: 16px}
-.card-row{height:14px;border-radius:10px;background: rgba(255,255,255,.08);margin:10px 0}
-.w-80{width:80%}.w-60{width:60%}
-.shimmer{position:relative;overflow:hidden}
-.shimmer::after{
-  content:\"\"; position:absolute; inset:-2px;
-  transform: translateX(-110%);
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,.10), transparent);
-  animation: shimmer 1.6s ease-in-out infinite;
-}
-@keyframes shimmer{0%{transform:translateX(-110%)}50%,100%{transform:translateX(110%)}}
-.chart{display:flex;gap:10px;align-items:flex-end;height:110px;margin-top:18px;padding: 8px 0}
-.bar{width:18%;height: var(--h);border-radius: 12px;background: linear-gradient(180deg, rgba(139,92,246,.95), rgba(34,211,238,.75));opacity:.9}
-
-.section{padding: 34px 0}
-.h2{font-size: clamp(1.5rem, 2.4vw, 2.1rem); margin: 0 0 8px}
-.p{color:var(--muted);margin:0 0 18px}
-.cards{display:grid;grid-template-columns: repeat(3, 1fr); gap: 14px}
-.card{
-  padding: 16px 16px 14px;
-  border-radius: 16px;
-  background: var(--card);
-  border:1px solid rgba(255,255,255,.10);
-}
-.card h3{margin:0 0 6px}
-.card p{margin:0;color:var(--muted)}
-
-.split{display:grid;grid-template-columns: 1fr 1fr; gap: 14px}
-.panel{padding: 16px;border-radius: 16px;background: var(--card);border:1px solid rgba(255,255,255,.10)}
-.panel-accent{background: linear-gradient(180deg, rgba(139,92,246,.14), rgba(34,211,238,.10));}
-.list{margin: 10px 0 0 18px;color:var(--muted)}
-.muted{color:var(--muted)}
-
-.form{max-width: 620px}
-.field{display:block;margin: 12px 0}
-.field span{display:block;margin: 0 0 6px;color: var(--muted);font-size:.92rem}
-input,textarea{
-  width:100%;
-  color:var(--fg);
-  background: rgba(255,255,255,.05);
-  border:1px solid rgba(255,255,255,.14);
-  border-radius: 12px;
-  padding: 10px 12px;
-  outline:none;
-}
-input:focus,textarea:focus{border-color: rgba(34,211,238,.55); box-shadow: 0 0 0 4px rgba(34,211,238,.12)}
-.form-row{display:flex;gap:12px;align-items:center;margin-top: 10px}
-.status{color:var(--muted);font-size:.95rem;min-height: 1.2em}
-.status.ok{color:#86efac}
-.status.err{color:#fca5a5}
-
-.footer{display:flex;justify-content:space-between;align-items:center;padding-top: 26px;border-top:1px solid rgba(255,255,255,.08);color:var(--muted)}
-.footer a{opacity:.9}
-.footer a:hover{opacity:1}
-
-[data-animate]{opacity:0;transform: translateY(12px);transition: opacity .55s ease, transform .55s ease}
-[data-animate].in{opacity:1;transform: translateY(0)}
-
-@media (max-width: 980px){
-  .hero{grid-template-columns: 1fr; padding-top: 34px}
-  .cards{grid-template-columns: 1fr}
-  .split{grid-template-columns: 1fr}
-  .nav{gap:10px}
-}
-"""
-            js = """(() => {
-  const year = document.getElementById('year');
-  if (year) year.textContent = String(new Date().getFullYear());
-
-  const prefersReduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  const animated = Array.from(document.querySelectorAll('[data-animate]'));
-
-  if (!prefersReduced && 'IntersectionObserver' in window) {
-    const io = new IntersectionObserver((entries) => {
-      for (const e of entries) {
-        if (e.isIntersecting) {
-          e.target.classList.add('in');
-          io.unobserve(e.target);
-        }
-      }
-    }, { threshold: 0.18 });
-    animated.forEach((el, idx) => {
-      el.style.transitionDelay = `${Math.min(240, idx * 40)}ms`;
-      io.observe(el);
-    });
-  } else {
-    animated.forEach((el) => el.classList.add('in'));
-  }
-
-  const form = document.getElementById('contactForm');
-  const statusEl = document.getElementById('formStatus');
-
-  const API_BASE_URL = (window.API_BASE_URL || '').replace(/\\/$/, '');
-  const endpoint = () => `${API_BASE_URL}/contact`;
-
-  const setStatus = (text, kind) => {
-    if (!statusEl) return;
-    statusEl.textContent = text || '';
-    statusEl.classList.remove('ok', 'err');
-    if (kind) statusEl.classList.add(kind);
-  };
-
-  const validate = (payload) => {
-    const errors = [];
-    const name = (payload.name || '').trim();
-    const email = (payload.email || '').trim();
-    const message = (payload.message || '').trim();
-    if (!name) errors.push('Name is required.');
-    if (!email) errors.push('Email is required.');
-    if (email && !/^\\S+@\\S+\\.\\S+$/.test(email)) errors.push('Email looks invalid.');
-    if (!message) errors.push('Message is required.');
-    if (name.length > 100) errors.push('Name is too long.');
-    if (email.length > 254) errors.push('Email is too long.');
-    if (message.length > 2000) errors.push('Message is too long.');
-    return errors;
-  };
-
-  if (form) {
-    form.addEventListener('submit', async (ev) => {
-      ev.preventDefault();
-      const fd = new FormData(form);
-      const payload = {
-        name: String(fd.get('name') || ''),
-        email: String(fd.get('email') || ''),
-        message: String(fd.get('message') || ''),
-      };
-
-      const errs = validate(payload);
-      if (errs.length) {
-        setStatus(errs[0], 'err');
-        return;
-      }
-
-      setStatus('Sending…');
-      try {
-        const res = await fetch(endpoint(), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok || data.success === false) {
-          const msg = data.message || 'Request failed. Please try again.';
-          setStatus(msg, 'err');
-          return;
-        }
-        setStatus('Thanks — we got your message.', 'ok');
-        form.reset();
-      } catch (e) {
-        setStatus('Network error. Is the API running?', 'err');
-      }
-    });
-  }
-})();"""
-            readme = """# Frontend
-
-Static animated landing page (vanilla HTML/CSS/JS).
-
-## Run locally
-
-Serve these files with any static server. For example from the repo/workspace root:
-
-```bash
-python -m http.server 5173 --directory frontend
-```
-
-Then open `http://localhost:5173/`.
-
-## API base URL
-
-By default the form POSTs to `/contact` on the same origin. To point at a different API, set in the browser console:
-
-```js
-window.API_BASE_URL = \"http://127.0.0.1:8000\"
-```
-"""
-            refs: List[ArtifactRef] = []
-            refs.append(self._write_artifact(os.path.join("frontend", "index.html"), html, tags=["frontend"]))
-            refs.append(self._write_artifact(os.path.join("frontend", "styles.css"), css, tags=["frontend"]))
-            refs.append(self._write_artifact(os.path.join("frontend", "app.js"), js, tags=["frontend"]))
-            refs.append(self._write_artifact(os.path.join("frontend", "README.md"), readme, tags=["frontend"]))
+            sys = (
+                "You are the FrontendAgent. Generate the frontend as a set of files.\n"
+                "Output only fenced file blocks. Each fence must include the file path in the fence info.\n"
+                "Example: ```file:frontend/index.html\n...\n```\n"
+            )
+            user = (
+                f"Goal: {goal}\n\n{huddle}{inject}{checklist}\n\n"
+                "Generate these files:\n"
+                "- frontend/index.html\n"
+                "- frontend/styles.css\n"
+                "- frontend/app.js\n"
+                "- frontend/README.md\n\n"
+                "Behavior:\n"
+                "- `frontend/app.js` submits the form to `${base}/contact` with JSON.\n"
+                "- `base` is `window.API_BASE_URL` if set, else empty string.\n"
+                "- Show success/failure messages in the UI.\n"
+            )
+            out = self._run_with_tools([{"role": "system", "content": sys}, {"role": "user", "content": user}])
+            refs = self._parse_and_write_fenced_files(out, "frontend")
 
             self._last_report = AgentReport(
                 agent=self.name,
                 status="ok",
-                progress="frontend scaffold",
+                progress="frontend scaffold" if refs else "no files written",
                 artifacts=[r.path for r in refs],
             )
             return refs
@@ -931,194 +567,48 @@ class BackendAgent(BaseAgent):
         checklist = self._checklist_prompt(inputs)
         mode = getattr(self._last_plan, "step", "be_contract") if self._last_plan else "be_contract"
         if mode == "be_scaffold":
-            app_py = r'''import json
- import os
- import re
- import time
-import uuid
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, List
-
-EMAIL_RE = re.compile(r"^\S+@\S+\.\S+$")
-
-
-def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: Dict[str, Any]) -> None:
-    body = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
-    handler.send_response(status)
-    handler.send_header("Content-Type", "application/json; charset=utf-8")
-    handler.send_header("Content-Length", str(len(body)))
-    handler.send_header("Access-Control-Allow-Origin", "*")
-    handler.send_header("Access-Control-Allow-Headers", "Content-Type")
-    handler.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
-    handler.end_headers()
-    handler.wfile.write(body)
-
-
-def validate_contact(payload: Dict[str, Any]) -> Dict[str, str]:
-    errors: Dict[str, str] = {}
-    name = str(payload.get("name") or "").strip()
-    email = str(payload.get("email") or "").strip()
-    message = str(payload.get("message") or "").strip()
-    if not name:
-        errors["name"] = "required"
-    elif len(name) > 100:
-        errors["name"] = "max_length"
-    if not email:
-        errors["email"] = "required"
-    elif len(email) > 254:
-        errors["email"] = "max_length"
-    elif not EMAIL_RE.match(email):
-        errors["email"] = "invalid"
-    if not message:
-        errors["message"] = "required"
-    elif len(message) > 2000:
-        errors["message"] = "max_length"
-    return errors
-
-
-class ContactService:
-    def __init__(self) -> None:
-        self.submissions: List[Dict[str, Any]] = []
-        self._rate: Dict[str, List[float]] = {}
-
-    def rate_limited(self, ip: str, limit: int = 10, window_sec: int = 60) -> bool:
-        now = time.time()
-        bucket = [t for t in (self._rate.get(ip) or []) if now - t < window_sec]
-        limited = len(bucket) >= limit
-        if not limited:
-            bucket.append(now)
-        self._rate[ip] = bucket
-        return limited
-
-    def create(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        cid = str(uuid.uuid4())
-        rec = {
-            "id": cid,
-            "name": str(payload.get("name") or "").strip(),
-            "email": str(payload.get("email") or "").strip(),
-            "message": str(payload.get("message") or "").strip(),
-            "ts": int(time.time()),
-        }
-        self.submissions.append(rec)
-        return rec
-
-
-SERVICE = ContactService()
-
-
-class Handler(BaseHTTPRequestHandler):
-    server_version = "NovaFlowHTTP/1.0"
-
-    def log_message(self, fmt: str, *args: Any) -> None:
-        return
-
-    def do_OPTIONS(self) -> None:  # noqa: N802
-        _json_response(self, 200, {"ok": True})
-
-    def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/contact":
-            _json_response(self, 404, {"success": False, "message": "not found"})
-            return
-        ip = (self.client_address[0] if self.client_address else "unknown") or "unknown"
-        if SERVICE.rate_limited(ip):
-            _json_response(self, 429, {"success": False, "message": "rate_limited"})
-            return
-
-        try:
-            n = int(self.headers.get("Content-Length") or "0")
-            if n <= 0 or n > 200_000:
-                _json_response(self, 400, {"success": False, "message": "invalid_body"})
-                return
-            raw = self.rfile.read(n)
-            payload = json.loads(raw.decode("utf-8"))
-            if not isinstance(payload, dict):
-                _json_response(self, 400, {"success": False, "message": "invalid_json"})
-                return
-        except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
-            _json_response(self, 400, {"success": False, "message": "invalid_json"})
-            return
-
-        errors = validate_contact(payload)
-        if errors:
-            _json_response(self, 400, {"success": False, "errors": errors})
-            return
-
-        rec = SERVICE.create(payload)
-        _json_response(self, 201, {"success": True, "id": rec["id"]})
-
-
-def create_server(host: str = "127.0.0.1", port: int = 8000) -> ThreadingHTTPServer:
-    return ThreadingHTTPServer((host, int(port)), Handler)
-
-
-def main() -> None:
-    host = os.environ.get("HOST") or "127.0.0.1"
-    port = int(os.environ.get("PORT") or "8000")
-    srv = create_server(host=host, port=port)
-    print(f"Backend listening on http://{host}:{port}")
-    try:
-        srv.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        srv.server_close()
-
-
-if __name__ == "__main__":
-    main()
-'''
-            readme = """# Backend
-
-Minimal backend API (stdlib) implementing `POST /contact`.
-
-## Run locally
-
-From the repo/workspace root:
-
-```bash
-python backend/app.py
-```
-
-By default the server listens on `http://127.0.0.1:8000`.
-
-Environment variables:
-- `HOST` (default `127.0.0.1`)
-- `PORT` (default `8000`)
-"""
-            refs: List[ArtifactRef] = []
-            refs.append(self._write_artifact(os.path.join("backend", "app.py"), app_py, tags=["backend"]))
-            refs.append(self._write_artifact(os.path.join("backend", "README.md"), readme, tags=["backend"]))
-            refs.append(self._write_artifact(os.path.join("backend", "__init__.py"), "", tags=["backend"]))
+            sys = (
+                "You are the BackendAgent. Generate a minimal backend as a set of files.\n"
+                "Output only fenced file blocks, and include the file path in the fence info.\n"
+                "Required files: backend/app.py, backend/__init__.py, backend/README.md\n"
+            )
+            user = (
+                f"Goal: {goal}\n\n{huddle}{inject}{checklist}\n\n"
+                "Implement a minimal API that matches the contract.\n"
+                "Requirements for backend/app.py:\n"
+                "- Expose create_server(host, port) returning an http.server.ThreadingHTTPServer.\n"
+                "- Implement POST /contact returning JSON with success=true and an id on success.\n"
+                "- Implement basic input validation.\n"
+            )
+            out = self._run_with_tools([{"role": "system", "content": sys}, {"role": "user", "content": user}])
+            refs = self._parse_and_write_fenced_files(out, "backend")
 
             self._last_report = AgentReport(
                 agent=self.name,
                 status="ok",
-                progress="backend scaffold",
+                progress="backend scaffold" if refs else "no files written",
                 artifacts=[r.path for r in refs],
             )
             return refs
 
+
         _ = self._rag_search("OpenAPI contract")
-        messages = [
-            {"role": "system", "content": "You are the BackendAgent. Output compact code/specs. Use a single backend stack and keep the contract aligned to what will be implemented."},
-            {"role": "user", "content": f"Goal: {goal}\n\n{huddle}{inject}{checklist}\n\nTasks:\n1) Propose an API contract (OpenAPI YAML) for the target app domain described in the goal.\n2) Provide a brief domain model and endpoints list. Return YAML between ```yaml fences."},
-        ]
-        out = self._run_with_tools(messages)
-        yaml_text: Optional[str] = None
-        if "```yaml" in out:
-            parts = out.split("```yaml", 1)
-            if len(parts) > 1:
-                y = parts[1].split("```", 1)[0]
-                yaml_text = y.strip() + "\n"
-        refs2: List[ArtifactRef] = []
-        if yaml_text:
-            refs2.append(self._write_artifact(os.path.join("contracts", "openapi.yaml"), yaml_text, tags=["contract", "openapi"]))
-        refs2.append(self._write_artifact(os.path.join("backend", "README.md"), out, tags=["backend"]))
+        sys = (
+            "You are the BackendAgent. Draft an OpenAPI contract aligned to the goal.\n"
+            "Output only fenced file blocks.\n"
+            "Required: contracts/openapi.yaml (OpenAPI YAML). Optional: backend/README.md.\n"
+        )
+        user = (
+            f"Goal: {goal}\n\n{huddle}{inject}{checklist}\n\n"
+            "Produce contracts/openapi.yaml as OpenAPI 3.0 YAML with /contact POST.\n"
+        )
+        out = self._run_with_tools([{"role": "system", "content": sys}, {"role": "user", "content": user}])
+        refs2 = self._parse_and_write_fenced_files(out, "")
 
         self._last_report = AgentReport(
             agent=self.name,
             status="ok",
-            progress="API contract + docs" if yaml_text else "backend docs (no OpenAPI parsed)",
+            progress="API contract + docs" if refs2 else "no files written",
             artifacts=[r.path for r in refs2],
         )
         return refs2
@@ -1213,91 +703,28 @@ class TestAgent(BaseAgent):
             )
             return []
 
-        smoke_py = r'''import json
-import threading
-import time
-import urllib.error
-import urllib.request
-
-
-def _post_json(url: str, payload: dict) -> tuple[int, dict]:
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, method="POST", headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-            return resp.status, (json.loads(body) if body else {})
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        return int(e.code), (json.loads(body) if body else {})
-
-
-def main() -> int:
-    from backend.app import create_server
-
-    srv = create_server(host="127.0.0.1", port=0)
-    port = int(srv.server_address[1])
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
-    th.start()
-    try:
-        time.sleep(0.05)
-        status, data = _post_json(f"http://127.0.0.1:{port}/contact", {"name": "Alice", "email": "alice@example.com", "message": "Hello"})
-        assert status in (200, 201), (status, data)
-        assert data.get("success") is True, data
-        assert isinstance(data.get("id"), str) and data.get("id"), data
-        return 0
-    finally:
-        srv.shutdown()
-        srv.server_close()
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-'''
-        contract_tests = [
-            {"id": "api_contract", "type": "schema", "spec_path": "contracts/openapi.yaml"},
-            {
-                "id": "unit-frontend-files",
-                "type": "unit",
-                "assertions": [
-                    {"kind": "file_exists", "path": "frontend/index.html"},
-                    {"kind": "file_exists", "path": "frontend/styles.css"},
-                    {"kind": "file_exists", "path": "frontend/app.js"},
-                ],
-            },
-            {
-                "id": "unit-backend-files",
-                "type": "unit",
-                "assertions": [
-                    {"kind": "file_exists", "path": "backend/app.py"},
-                    {"kind": "file_exists", "path": "backend/README.md"},
-                ],
-            },
-            {
-                "id": "smoke-post-contact",
-                "type": "command",
-                "command": "python tests/smoke_post_contact.py",
-                "cwd": ".",
-                "timeout_sec": 60,
-                "reason": "Smoke: start backend and POST /contact",
-                "expected_exit_code": 0,
-            },
-        ]
-
-        refs: List[ArtifactRef] = []
-        refs.append(self._write_artifact(os.path.join("tests", "smoke_post_contact.py"), smoke_py, tags=["tests", "smoke"]))
-        refs.append(
-            self._write_artifact(
-                os.path.join("contracts", "tests", "contract_tests.json"),
-                json.dumps(contract_tests, indent=2),
-                tags=["tests", "contracts"],
-            )
+        goal = inputs.get("goal", "")
+        decisions = inputs.get("decisions", [])
+        inject = decision_injection_text(decisions) if decisions else ""
+        huddle = self._huddle_summaries_prompt(inputs)
+        checklist = self._checklist_prompt(inputs)
+        sys = (
+            "You are the TestAgent. Generate test files and a contract test manifest.\n"
+            "Output only fenced file blocks. Required: tests/smoke_post_contact.py and contracts/tests/contract_tests.json\n"
         )
+        user = (
+            f"Goal: {goal}\n\n{huddle}{inject}{checklist}\n\n"
+            "Write:\n"
+            "- tests/smoke_post_contact.py: starts backend via backend.app.create_server and POSTs /contact\n"
+            "- contracts/tests/contract_tests.json: includes api_contract schema + unit checks + a smoke command test\n"
+        )
+        out = self._run_with_tools([{"role": "system", "content": sys}, {"role": "user", "content": user}])
+        refs = self._parse_and_write_fenced_files(out, "")
 
         self._last_report = AgentReport(
             agent=self.name,
             status="ok",
-            progress="Smoke + contract tests written",
+            progress="Smoke + contract tests written" if refs else "no files written",
             artifacts=[r.path for r in refs],
         )
         return refs

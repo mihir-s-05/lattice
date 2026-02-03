@@ -29,6 +29,7 @@ from .constants import DEFAULT_STAGE_GATES
 from .constants import DEFAULT_HUDDLE_DIR
 from .checklist import Checklist, default_router_checklist
 from .errors import ProviderError
+from .command_validation import command_is_dangerous, validate_command
 
 
 class ExecutionMode(ABC):
@@ -105,6 +106,16 @@ class ExecutionMode(ABC):
     @abstractmethod
     def execute(self, goal: str, transcript: RunningTranscript) -> Dict[str, Any]:
         pass
+
+    @abstractmethod
+    def step(
+        self,
+        step_name: str,
+        goal: str,
+        transcript: RunningTranscript,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        pass
         
     def _execute_huddle(
         self,
@@ -144,68 +155,13 @@ class ExecutionMode(ABC):
         return decisions
 
     def _command_is_dangerous(self, cmd: str) -> bool:
-        text = cmd.lower()
-        patterns = [
-            r"\brm\s+-rf\s+/",
-            r"\brm\s+-fr\s+/",
-            r"\brm\s+-r\s+/\b",
-            r"\bdel\s+/s\b",
-            r"\bformat\b",
-            r"\bmkfs\b",
-            r"\bdiskpart\b",
-            r"\bshutdown\b",
-            r"\breboot\b",
-            r"\bpoweroff\b",
-            r"\bdd\s+if=",
-            r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:",
-        ]
-        import re
-        return any(re.search(p, text) for p in patterns)
+        return command_is_dangerous(cmd)
 
     def _validate_command(self, cmd: str) -> Optional[str]:
-        if self._command_is_dangerous(cmd):
-            return "command blocked: dangerous pattern detected"
         policy = getattr(self.cfg, "command_policy", None) if self.cfg else None
         allowlist = list((policy.allowlist if policy else []) or [])
         denylist = list((policy.denylist if policy else []) or [])
-
-        lowered = cmd.lower()
-        blocked_tokens = [
-            "curl ",
-            "wget ",
-            "invoke-webrequest",
-            "iwr ",
-            "irm ",
-            "powershell ",
-            "pwsh ",
-            "certutil",
-            "bitsadmin",
-            "ssh ",
-            "scp ",
-            "sftp ",
-            "ftp ",
-            "telnet ",
-            "nc ",
-            "ncat ",
-            "netcat ",
-            "socat ",
-        ]
-        if any(t in lowered for t in blocked_tokens):
-            return "command blocked: network-capable tooling is disabled by default"
-        for d in denylist:
-            if d and d.lower() in lowered:
-                return f"command blocked by denylist entry: {d}"
-
-        if allowlist:
-            head = cmd.strip().split(" ")[0]
-            if not any(head.lower().startswith(a.lower()) for a in allowlist):
-                return "command blocked: not in allowlist"
-        else:
-            head = (cmd.strip().split(" ")[0] if cmd.strip() else "").lower()
-            default_allow = {"python", "py", "pytest", "pip", "pip3", "uv", "poetry", "npm", "node", "npx", "pnpm", "yarn", "git", "rg", "ruff", "black", "mypy", "echo", "dir", "type"}
-            if head and head not in default_allow:
-                return f"command blocked: not in default safe allowlist (head={head}). Configure allowlist to permit."
-        return None
+        return validate_command(cmd, allowlist=allowlist, denylist=denylist)
 
 
 class LadderMode(ExecutionMode):
@@ -240,6 +196,48 @@ class LadderMode(ExecutionMode):
         return {
             "plan_snapshots": plan_snapshots,
             "decisions": decisions
+        }
+
+    def step(
+        self,
+        step_name: str,
+        goal: str,
+        transcript: RunningTranscript,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        plan_snapshots = list((state or {}).get("plan_snapshots") or [])
+        decisions: List[DecisionSummary] = list((state or {}).get("decisions") or [])
+
+        step = (step_name or "").strip().lower()
+        if step == "contracts":
+            active = [self.agents["backend"], self.agents["llmapi"], self.agents["tests"]]
+            self._execute_step("contracts", active, goal, decisions, plan_snapshots)
+
+            ctx = self._agent_context(goal, decisions)
+            if any(a.needs_huddle(ctx) for a in active):
+                new_decisions = self._execute_huddle(
+                    "API contract alignment",
+                    ["Resource fields?", "Endpoints & DTOs?", "Error model?"],
+                    decisions,
+                    transcript,
+                )
+                decisions.extend(new_decisions)
+                transcript.add_decision_injection(decision_injection_text(decisions))
+        elif step == "backend_scaffold":
+            active = [self.agents["backend"], self.agents["llmapi"]]
+            self._execute_step("backend_scaffold", active, goal, decisions, plan_snapshots)
+        elif step == "frontend_scaffold":
+            active = [self.agents["frontend"]]
+            self._execute_step("frontend_scaffold", active, goal, decisions, plan_snapshots)
+        elif step == "smoke_tests":
+            active = [self.agents["tests"]]
+            self._execute_step("smoke_tests", active, goal, decisions, plan_snapshots)
+        else:
+            raise ValueError(f"Unknown ladder step: {step_name}")
+
+        return {
+            "plan_snapshots": plan_snapshots,
+            "decisions": decisions,
         }
     
     def _execute_step(
@@ -335,6 +333,59 @@ class TracksMode(ExecutionMode):
             "decisions": decisions
         }
 
+    def step(
+        self,
+        step_name: str,
+        goal: str,
+        transcript: RunningTranscript,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        plan_snapshots = list((state or {}).get("plan_snapshots") or [])
+        decisions: List[DecisionSummary] = list((state or {}).get("decisions") or [])
+
+        step = (step_name or "").strip().lower()
+        if step not in ("tracks", "slice-1", "sync-1"):
+            raise ValueError(f"Unknown tracks step: {step_name}")
+
+        active = list(self.agents.values())
+        ctx = self._agent_context(goal, decisions)
+        plans = [a.plan("tracks", ctx) for a in active]
+        self.logger.log("router_plans", mode="tracks", step="slice-1", plans=[asdict(p) for p in plans])
+
+        for agent in active:
+            ctx_local = self._agent_context(goal, decisions)
+            refs = agent.act(ctx_local)
+            for r in refs:
+                self._record_touched(r.path)
+            self.logger.log("agent_turn", agent=agent.name, artifacts=[r.path for r in refs])
+
+        if any(a.needs_huddle(ctx) for a in active):
+            new_decisions = self._execute_huddle(
+                "Parallel tracks alignment",
+                ["Resource fields?", "Endpoints & DTOs?", "Error model?"],
+                decisions,
+                transcript,
+            )
+            decisions.extend(new_decisions)
+            transcript.add_decision_injection(decision_injection_text(decisions))
+
+        results = self.runner.scan_and_run(allow_commands=True, command_validator=self._validate_command)
+        gate_results = self.evaluator.evaluate(self.gates)
+
+        plan_snapshots.append(
+            {
+                "mode": "tracks",
+                "step": "sync-1",
+                "gates": [asdict(g) for g in gate_results],
+                "tests": [asdict(r) for r in results],
+            }
+        )
+
+        return {
+            "plan_snapshots": plan_snapshots,
+            "decisions": decisions,
+        }
+
 
 class WeaveMode(ExecutionMode):
     
@@ -403,6 +454,18 @@ class WeaveMode(ExecutionMode):
             "decisions": decisions,
             "plan_graph": plan_graph
         }
+
+    def step(
+        self,
+        step_name: str,
+        goal: str,
+        transcript: RunningTranscript,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        step = (step_name or "").strip().lower()
+        if step not in ("contracts", "contracts/weave_docs", "weave_docs"):
+            raise ValueError(f"Unknown weave step: {step_name}")
+        return self.execute(goal, transcript)
 
 
 class ExecutionModeFactory:

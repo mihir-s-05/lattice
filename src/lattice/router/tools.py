@@ -188,7 +188,7 @@ def build_tools_manifest() -> List[Dict[str, Any]]:
 
     tools.append(_tool_schema(
         "rag_search",
-        "Query the run-scoped vector index for relevant artifacts/transcripts.",
+        "Keyword-based search (BM25) over run-scoped artifacts and transcripts.",
         {
             "type": "object",
             "properties": {
@@ -265,29 +265,6 @@ def build_tools_manifest() -> List[Dict[str, Any]]:
         },
     ))
 
-    tools.append(_tool_schema(
-        "semantic_search",
-        "Semantic search over run-scoped artifacts/transcripts (includes huddle transcripts/summaries).",
-        {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "top_k": {"type": "integer", "minimum": 1, "maximum": 20},
-                "where": {
-                    "type": ["object", "null"],
-                    "properties": {
-                        "doc_id_prefix": {"type": ["string", "null"]},
-                        "path_prefix": {"type": ["string", "null"]},
-                        "path_contains": {"type": ["string", "null"]},
-                        "tags_any": {"type": "array", "items": {"type": "string"}},
-                        "tags_all": {"type": "array", "items": {"type": "string"}},
-                        "kind": {"type": ["string", "null"]},
-                    },
-                },
-            },
-            "required": ["query", "top_k"],
-        },
-    ))
 
     tools.append(_tool_schema(
         "coherence_check",
