@@ -4,13 +4,13 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from .constants import DEFAULT_MESSAGE_MAX_LENGTH, DEFAULT_CONTENT_MAX_LENGTH
 
 
 def _ts() -> str:
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _fmt_messages(messages: List[Dict[str, Any]], max_len: int = DEFAULT_MESSAGE_MAX_LENGTH) -> str:
@@ -21,7 +21,7 @@ def _fmt_messages(messages: List[Dict[str, Any]], max_len: int = DEFAULT_MESSAGE
         if isinstance(content, dict):
             try:
                 content = json.dumps(content)
-            except Exception:
+            except (TypeError, ValueError):
                 content = str(content)
         s = str(content)
         if len(s) > max_len:
@@ -135,7 +135,7 @@ def _safe_read(path: str) -> Optional[str]:
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             return fh.read()
-    except Exception:
+    except OSError:
         return None
 
 
@@ -190,7 +190,7 @@ def generate_run_transcript(run_dir: str, out_filename: str = "transcript.md") -
             cfg = json.load(cf)
             router_model_default = cfg.get("router_model_default") or router_model_default
             agent_model_default = cfg.get("agent_model_default") or agent_model_default
-    except Exception:
+    except (FileNotFoundError, OSError, ValueError):
         pass
 
     decision_paths: Dict[str, str] = {}
@@ -199,14 +199,14 @@ def generate_run_transcript(run_dir: str, out_filename: str = "transcript.md") -
             for line in f:
                 try:
                     rec = json.loads(line)
-                except Exception:
+                except json.JSONDecodeError:
                     continue
                 if rec.get("event") == "decision_summary":
                     did = rec.get("decision_id")
                     path = rec.get("path")
                     if did and path:
                         decision_paths[did] = path
-    except FileNotFoundError:
+    except (FileNotFoundError, OSError):
         with open(out_path, "w", encoding="utf-8") as out:
             out.write(f"# Run Transcript: {os.path.basename(run_dir)}\n\n(no log found)\n")
         return out_path
@@ -219,7 +219,7 @@ def generate_run_transcript(run_dir: str, out_filename: str = "transcript.md") -
                 continue
             try:
                 rec = json.loads(line)
-            except Exception:
+            except json.JSONDecodeError:
                 continue
             ts = rec.get("ts", "")
             ev = rec.get("event", "")
@@ -269,7 +269,7 @@ def generate_run_transcript(run_dir: str, out_filename: str = "transcript.md") -
                         for it in arr:
                             try:
                                 chunks.append(f"- {json.dumps(it, ensure_ascii=False)}")
-                            except Exception:
+                            except (TypeError, ValueError):
                                 chunks.append(f"- {it}")
                 if obs:
                     chunks.append("Observation:")

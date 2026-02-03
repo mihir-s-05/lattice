@@ -31,21 +31,30 @@ DEFAULT_RAG_MIN_SCORE = 0.15
 DEFAULT_RAG_MAX_INGEST_FILES = 20
 DEFAULT_RAG_MAX_FILE_SIZE = 1024 * 1024
 
-DEFAULT_ROUTER_PROVIDER_ORDER = ["groq", "lmstudio"]
-DEFAULT_AGENT_PROVIDER_ORDER = ["gemini-openai-compat", "lmstudio"]
+DEFAULT_ROUTER_PROVIDER_ORDER = ["openai", "groq", "lmstudio"]
+DEFAULT_AGENT_PROVIDER_ORDER = ["openai", "gemini-openai-compat", "lmstudio"]
 
 DEFAULT_MODEL_BY_PROVIDER: Dict[str, str] = {
+    "openai": "gpt-4o-mini",
     "groq": "openai/gpt-oss-120b",
     "gemini-openai-compat": "gemini-2.5-flash-lite",
     "lmstudio": "gpt-oss-20b",
 }
 
-DEFAULT_HTTP_TIMEOUT = 60
-DEFAULT_ROUTER_MAX_STEPS = 32
+DEFAULT_HTTP_TIMEOUT = 120
+DEFAULT_CONNECT_TIMEOUT = 30
+DEFAULT_ROUTER_MAX_STEPS = 64
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_MAX_TOKENS = None
-DEFAULT_RETRY_COUNT = 2
-DEFAULT_MAX_RETRY_DELAY = 8
+DEFAULT_RETRY_COUNT = 5
+DEFAULT_MAX_RETRY_DELAY = 30
+
+DEFAULT_MAX_SLICE_AGENTS = 3
+DEFAULT_MAX_OPEN_HUDDLES = 2
+DEFAULT_COOLDOWN_THRESHOLD = 2
+DEFAULT_COOLDOWN_SECONDS = 5.0
+DEFAULT_HUDDLE_MAX_ROUNDS = 5
+DEFAULT_NO_TOOL_STREAK_LIMIT = 2
 
 DEFAULT_ARTIFACT_ID_LENGTH = 16
 DEFAULT_HASH_ALGORITHM = "sha256"
@@ -59,23 +68,23 @@ DEFAULT_STAGE_GATES = [
     {
         "id": "sg_api_contract",
         "name": "API contract passes",
-        "conditions": ["tests.pass('api_contract')"]
+        "conditions": ["tests.pass('api_contract')"],
     },
     {
         "id": "sg_be_scaffold",
         "name": "Backend scaffold present",
-        "conditions": ["tests.pass('api_contract') and artifact.exists('backend/**')"]
+        "conditions": ["tests.pass('api_contract') and artifact.exists('backend/**')"],
     },
     {
         "id": "sg_fe_scaffold",
         "name": "Frontend scaffold present",
-        "conditions": ["artifact.exists('frontend/**')"]
+        "conditions": ["artifact.exists('frontend/**') or artifact.exists('public/index.html')"],
     },
     {
         "id": "sg_smoke",
         "name": "Smoke tests pass",
-        "conditions": ["tests.pass('smoke_suite')"]
-    }
+        "conditions": ["tests.pass('smoke_suite')"],
+    },
 ]
 
 DEFAULT_EXECUTION_MODE = "weave"
@@ -158,12 +167,12 @@ def get_runs_base_dir() -> str:
     Defaults to ~/.lattice/runs, but can be overridden via the LATTICE_RUNS_DIR
     environment variable. Ensures the directory exists.
     """
-    base = os.environ.get("LATTICE_RUNS_DIR")
+    base = os.environ.get("LATTICE_RUNS_DIR") or os.environ.get("LATTICE_RUN_ROOT")
     if not base or not str(base).strip():
         base = os.path.join(os.path.expanduser("~"), ".lattice", "runs")
     try:
         os.makedirs(base, exist_ok=True)
-    except Exception:
+    except OSError:
         fallback = os.path.join(os.getcwd(), "runs")
         os.makedirs(fallback, exist_ok=True)
         return fallback

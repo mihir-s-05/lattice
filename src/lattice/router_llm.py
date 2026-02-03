@@ -14,6 +14,17 @@ class RouterLLM:
         self.cfg = cfg
         self.logger = logger
         self.tools = tools
+        self._previous_response_id: Optional[str] = None
+        self._previous_messages_len: Optional[int] = None
+
+    def _delta_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if self._previous_messages_len is None:
+            return messages
+        start = min(self._previous_messages_len, len(messages))
+        delta = messages[start:]
+        if not delta:
+            return messages[-1:]
+        return delta
 
     def _call(self, messages: List[Dict[str, str]], phase: str) -> Dict[str, Any]:
         order = self.cfg.router_provider_order
@@ -23,15 +34,21 @@ class RouterLLM:
                 model_overrides[order[0]] = self.cfg.router_model_default
         t0 = time.time()
         try:
-            provider, base_url, model, raw, attempts = call_with_fallback(
+            result = call_with_fallback(
                 providers=self.cfg.providers,
                 order=order,
                 messages=messages,
                 temperature=self.cfg.temperature,
                 max_tokens=self.cfg.max_tokens,
                 logger=self.logger,
+                retries=self.cfg.limits.retry_count,
+                http_timeout=self.cfg.limits.http_timeout,
+                connect_timeout=self.cfg.limits.connect_timeout,
+                max_retry_delay=self.cfg.limits.max_retry_delay,
                 tool_choice="none",
                 model_overrides=model_overrides,
+                caller="router",
+                stage=phase,
             )
         except ProviderError as e:
             self.logger.log(
@@ -49,25 +66,21 @@ class RouterLLM:
             )
             raise
         dt = int((time.time() - t0) * 1000)
-        text = ""
-        try:
-            text = raw["choices"][0]["message"].get("content") or ""
-        except Exception:
-            text = str(raw)
+        text = result.text or ""
         self.logger.log(
             "router_llm_turn",
             role="router",
             plan_phase=phase,
-            provider=provider,
-            model=model,
-            base_url=base_url,
+            provider=result.provider,
+            model=result.model,
+            base_url=result.base_url,
             request_prompt=messages,
             response_text=text,
             latency_ms=dt,
             error=None,
-            fallback_from=(order[0] if order and provider != order[0] else None),
+            fallback_from=(order[0] if order and result.provider != order[0] else None),
         )
-        return {"provider": provider, "model": model, "text": text}
+        return {"provider": result.provider, "model": result.model, "text": text, "api": result.api}
 
     def _call_with_tools(
         self,
@@ -82,18 +95,32 @@ class RouterLLM:
             if order:
                 model_overrides[order[0]] = self.cfg.router_model_default
         t0 = time.time()
+        msg_payload = messages
+        if self._previous_response_id:
+            msg_payload = self._delta_messages(messages)
+            msg_payload = [m for m in msg_payload if not m.get("_skip_for_responses")]
         try:
-            provider, base_url, model, raw, attempts = call_with_fallback(
+            result = call_with_fallback(
                 providers=self.cfg.providers,
                 order=order,
-                messages=messages,
+                messages=msg_payload,
                 temperature=self.cfg.temperature,
                 max_tokens=self.cfg.max_tokens,
                 logger=self.logger,
+                retries=self.cfg.limits.retry_count,
+                http_timeout=self.cfg.limits.http_timeout,
+                connect_timeout=self.cfg.limits.connect_timeout,
+                max_retry_delay=self.cfg.limits.max_retry_delay,
                 tools=tools,
                 tool_choice=tool_choice,
                 model_overrides=model_overrides,
+                previous_response_id=self._previous_response_id,
+                caller="router",
+                stage=phase,
             )
+            if result.response_id:
+                self._previous_response_id = result.response_id
+                self._previous_messages_len = len(messages)
         except ProviderError as e:
             self.logger.log(
                 "router_llm_turn",
@@ -111,23 +138,15 @@ class RouterLLM:
             )
             raise
         dt = int((time.time() - t0) * 1000)
-        text = None
-        try:
-            text = raw["choices"][0]["message"].get("content")
-        except Exception:
-            text = None
-        tool_calls = []
-        try:
-            tool_calls = raw["choices"][0]["message"].get("tool_calls") or []
-        except Exception:
-            tool_calls = []
+        text = result.text if isinstance(result.text, str) else None
+        tool_calls = result.tool_calls or []
         self.logger.log(
             "router_llm_turn",
             role="router",
             plan_phase=phase,
-            provider=provider,
-            model=model,
-            base_url=base_url,
+            provider=result.provider,
+            model=result.model,
+            base_url=result.base_url,
             request_prompt=messages,
             response_text=text,
             latency_ms=dt,
@@ -142,13 +161,39 @@ class RouterLLM:
                 for tc in tool_calls
             ],
         )
-        return {"provider": provider, "model": model, "text": text, "raw": raw}
+        return {
+            "provider": result.provider,
+            "model": result.model,
+            "text": text,
+            "raw": result.raw,
+            "tool_calls": tool_calls,
+            "api": result.api,
+            "response_items": result.response_items,
+        }
 
     def plan_init(self, goal: str, context_text: Optional[str] = None) -> Dict[str, Any]:
         sys = (
-            "You are the Router LLM for a multi-agent system."
-            " Propose Ladder vs. Tracks and outline 3-6 concise steps with goals and risks."
-            " Output a compact PlanSpec in markdown with a single code fence labeled plan."
+            "You are the Router LLM for a multi-agent system. Produce an initial execution plan as STRICT JSON only.\n"
+            "Schema:\n"
+            "{\n"
+            "  \"mode\": \"ladder\"|\"tracks\",\n"
+            "  \"mode_reason\": string,\n"
+            "  \"stages\": [\n"
+            "    {\n"
+            "      \"id\": string,  # short, e.g. contracts|backend_scaffold|frontend_scaffold|smoke_tests\n"
+            "      \"goal\": string,\n"
+            "      \"active_agents\": [\"backend\"|\"frontend\"|\"llmapi\"|\"tests\"],\n"
+            "      \"may_parallelize\": boolean,\n"
+            "      \"checkin\": {\"when\": \"after\"|\"on_blocked\"|\"both\", \"topic\": string}\n"
+            "    }\n"
+            "  ],\n"
+            "  \"risks\": [string]\n"
+            "}\n"
+            "Guidelines:\n"
+            "- ladder: milestone/stage-driven; tracks: multi-agent parallel-first.\n"
+            "- Even in ladder, stages may_parallelize=true when multiple agents can work in parallel within the stage.\n"
+            "- Prefer 3-6 stages.\n"
+            "Return ONLY the JSON object, no markdown."
         )
         user = f"Goal: {goal}"
         if context_text:
@@ -168,6 +213,7 @@ class RouterLLM:
         sys = (
             "You are facilitating a Huddle. Return 1-3 DecisionSummary JSON objects"
             " with fields: id (optional), topic, options[], decision, rationale, risks[], actions[], contracts[], links[], sources[]."
+            " You MAY also include an optional meta object for operational decisions: meta:{mode:'ladder'|'tracks'|null, stage_order?:string[], note?:string}."
             " Requirements:"
             " - options: array (objects or strings). If objects, include id and description."
             " - sources: array with at least 3 external entries, each {type:'external',url:'<url>',title:'<title>'}."

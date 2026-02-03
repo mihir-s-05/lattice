@@ -9,6 +9,7 @@ from .ids import ulid
 from .artifacts import ArtifactStore
 from .rag import RagIndex
 from .constants import DEFAULT_HUDDLE_DIR
+from datetime import datetime, timezone
 
 
 def ensure_dir(path: str) -> None:
@@ -37,8 +38,10 @@ class HuddleRecord:
     attendees: List[str]
     transcript_path: str
     decisions: List[str]
+    summary_path: Optional[str] = None
     mode: str = "dialog"
     auto_decision: bool = False
+    created_ts: Optional[str] = None
 
 
 def _coerce_list_str(x: Any) -> List[str]:
@@ -50,7 +53,7 @@ def _coerce_list_str(x: Any) -> List[str]:
             try:
                 val = json.loads(s)
                 x = val
-            except Exception:
+            except json.JSONDecodeError:
                 pass
     if isinstance(x, list):
         return [str(i) for i in x]
@@ -67,7 +70,7 @@ def _coerce_list_obj(x: Any) -> List[Dict[str, Any]]:
                 val = json.loads(s)
                 if isinstance(val, list):
                     x = val
-            except Exception:
+            except json.JSONDecodeError:
                 pass
     if isinstance(x, list):
         out: List[Dict[str, Any]] = []
@@ -82,10 +85,68 @@ def _coerce_list_obj(x: Any) -> List[Dict[str, Any]]:
                         if isinstance(obj, dict):
                             out.append(obj)
                             continue
-                    except Exception:
+                    except json.JSONDecodeError:
                         pass
                 out.append({"description": it})
         return out
+    return []
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def summarize_huddle_markdown(
+    *,
+    topic: str,
+    attendees: List[str],
+    questions: List[str],
+    notes: str,
+    decisions: List[DecisionSummary],
+    messages: Optional[List[Dict[str, str]]] = None,
+    max_message_lines: int = 12,
+) -> str:
+    lines: List[str] = []
+    lines.append(f"# Huddle Summary: {topic}")
+    if attendees:
+        lines.append(f"Attendees: {', '.join(attendees)}")
+    lines.append("")
+    if questions:
+        lines.append("## Questions")
+        for q in questions[:20]:
+            lines.append(f"- {q}")
+        lines.append("")
+    if decisions:
+        lines.append("## Decisions")
+        for d in decisions[:20]:
+            t = (d.topic or "").strip() or topic
+            dec = (d.decision or "").strip()
+            rat = (d.rationale or "").strip()
+            lines.append(f"- {t}: {dec}" if dec else f"- {t}")
+            if rat:
+                lines.append(f"  - Rationale: {rat[:300]}")
+        lines.append("")
+    if messages:
+        lines.append("## Highlights")
+        head = messages[:4]
+        tail = messages[-6:]
+        picked = head + [m for m in tail if m not in head]
+        count = 0
+        for m in picked:
+            if count >= max_message_lines:
+                break
+            speaker = (m.get("from") or "?").strip()
+            content = (m.get("content") or "").strip().replace("\n", " ")
+            if not content:
+                continue
+            lines.append(f"- {speaker}: {content[:240]}")
+            count += 1
+        lines.append("")
+    if notes:
+        lines.append("## Notes")
+        lines.append(notes.strip()[:2000])
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
 
 
 def _content_key(d: DecisionSummary) -> Tuple[Any, Any, Any]:
@@ -111,25 +172,19 @@ def dedupe_decisions(decisions: List[DecisionSummary]) -> List[DecisionSummary]:
             merged[key] = d
         else:
             base = merged[key]
-            try:
-                src = _normalize_sources((base.sources or []) + (d.sources or []))
-            except Exception:
-                src = (base.sources or [])
+            src = _normalize_sources((base.sources or []) + (d.sources or []))
             base.sources = src
             links: List[Dict[str, Any]] = []
-            try:
-                existing = {(l.get("title"), l.get("url")) for l in (base.links or []) if isinstance(l, dict)}
-                for l in (base.links or []):
-                    if isinstance(l, dict):
+            existing = {(l.get("title"), l.get("url")) for l in (base.links or []) if isinstance(l, dict)}
+            for l in (base.links or []):
+                if isinstance(l, dict):
+                    links.append(l)
+            for l in (d.links or []):
+                if isinstance(l, dict):
+                    k = (l.get("title"), l.get("url"))
+                    if k not in existing:
                         links.append(l)
-                for l in (d.links or []):
-                    if isinstance(l, dict):
-                        k = (l.get("title"), l.get("url"))
-                        if k not in existing:
-                            links.append(l)
-                            existing.add(k)
-            except Exception:
-                links = base.links or []
+                        existing.add(k)
             base.links = links
     return list(merged.values())
 
@@ -137,12 +192,8 @@ def dedupe_decisions(decisions: List[DecisionSummary]) -> List[DecisionSummary]:
 def ensure_provenance_links(decisions: List[DecisionSummary], default_link: Optional[Dict[str, Any]] = None) -> List[DecisionSummary]:
     """Ensure that if a decision has sources, it also has at least one link. If missing, add default_link if provided."""
     for d in decisions:
-        try:
-            if d.sources and (not d.links or len(d.links) == 0):
-                if default_link:
-                    d.links = [default_link]
-        except Exception:
-            continue
+        if d.sources and (not d.links or len(d.links) == 0) and default_link:
+            d.links = [default_link]
     return decisions
 
 
@@ -185,10 +236,12 @@ def _normalize_decision_obj(obj: Dict[str, Any]) -> DecisionSummary:
         try:
             parsed = json.loads(sources_in)
             sources = parsed if isinstance(parsed, list) else None
-        except Exception:
+        except json.JSONDecodeError:
             sources = None
     else:
         sources = sources_in or None
+    meta_in = obj.get("meta")
+    meta = meta_in if isinstance(meta_in, dict) else {}
     return DecisionSummary(
         id=did,
         topic=topic,
@@ -200,6 +253,7 @@ def _normalize_decision_obj(obj: Dict[str, Any]) -> DecisionSummary:
         contracts=contracts,
         links=links,
         sources=sources,
+        meta=meta,
     )
 
 
@@ -222,7 +276,7 @@ def _extract_json_objects(text: str) -> List[Dict[str, Any]]:
                 try:
                     obj = json.loads(frag)
                     objs.append(obj)
-                except Exception:
+                except json.JSONDecodeError:
                     pass
                 buf = []
                 in_obj = False
@@ -235,7 +289,7 @@ def _extract_json_objects(text: str) -> List[Dict[str, Any]]:
                         objs.append(v)
             elif isinstance(val, dict):
                 objs.append(val)
-        except Exception:
+        except json.JSONDecodeError:
             pass
     return objs
 
@@ -243,19 +297,7 @@ def _extract_json_objects(text: str) -> List[Dict[str, Any]]:
 def parse_decision_summaries(text: str) -> List[DecisionSummary]:
     objs = _extract_json_objects(text)
     if not objs:
-        return [
-            DecisionSummary(
-                id=f"ds_{ulid()}",
-                topic="Underspecified",
-                options=[],
-                decision=None,
-                rationale=None,
-                risks=[],
-                actions=[],
-                contracts=[],
-                links=[],
-            )
-        ]
+        return []
     out: List[DecisionSummary] = []
     for obj in objs:
         if isinstance(obj, dict):
@@ -272,20 +314,20 @@ def save_decisions(
     
     out: List[Tuple[DecisionSummary, str]] = []
     for d in decisions:
-        try:
-            d.sources = _normalize_sources(d.sources)
-        except Exception:
-            pass
+        d.sources = _normalize_sources(d.sources)
         art = artifacts.add_text(
             filename=os.path.join("decisions", f"{d.id}.json"),
             text=json.dumps(asdict(d), ensure_ascii=False, indent=2),
             tags=["decision", "json"],
             meta={"kind": "DecisionSummary", "id": d.id},
         )
-        try:
-            rag_index.ingest_text(art.id, json.dumps(asdict(d), ensure_ascii=False), art.path)
-        except Exception:
-            pass
+        rag_index.ingest_text(
+            art.id,
+            json.dumps(asdict(d), ensure_ascii=False),
+            art.path,
+            tags=["decision"],
+            meta={"kind": "DecisionSummary", "id": d.id},
+        )
         out.append((d, art.path))
     return out
 
@@ -296,11 +338,8 @@ def _normalize_sources(sources: Optional[List[Dict[str, Any]]]) -> List[Dict[str
         return out
     seen_keys: set = set()
     def _looks_like_url(txt: str) -> bool:
-        try:
-            s = (txt or "").strip().lower()
-            return s.startswith("http://") or s.startswith("https://")
-        except Exception:
-            return False
+        s = (txt or "").strip().lower()
+        return s.startswith("http://") or s.startswith("https://")
     for s in sources:
         if isinstance(s, str):
             if _looks_like_url(s):
@@ -370,21 +409,7 @@ def persist_decision_summary(
     rag_index: RagIndex,
     ds: DecisionSummary,
 ) -> Tuple[DecisionSummary, str]:
-    """Write-through persistence with source normalization and update logging handled by caller.
-
-    - Ensures artifacts/decisions/{id}.json is updated with normalized sources.
-    - Returns (DecisionSummary, rel_path).
-    """
     ds.sources = _normalize_sources(ds.sources)
-    rel = os.path.join("artifacts", "decisions", f"{ds.id}.json")
-    abs_path = os.path.join(run_dir, "artifacts", "decisions", f"{ds.id}.json")
-    before: Optional[Dict[str, Any]] = None
-    if os.path.exists(abs_path):
-        try:
-            with open(abs_path, "r", encoding="utf-8") as f:
-                before = json.load(f)
-        except Exception:
-            before = None
     ds_dict = asdict(ds)
     art = artifacts.add_text(
         filename=os.path.join("decisions", f"{ds.id}.json"),
@@ -392,10 +417,13 @@ def persist_decision_summary(
         tags=["decision", "json"],
         meta={"kind": "DecisionSummary", "id": ds.id},
     )
-    try:
-        rag_index.ingest_text(art.id, json.dumps(ds_dict, ensure_ascii=False), art.path)
-    except Exception:
-        pass
+    rag_index.ingest_text(
+        art.id,
+        json.dumps(ds_dict, ensure_ascii=False),
+        art.path,
+        tags=["decision"],
+        meta={"kind": "DecisionSummary", "id": ds.id},
+    )
     return ds, art.path
 
 
@@ -447,19 +475,58 @@ def save_huddle(
     ]
     with open(transcript_abs, "w", encoding="utf-8") as f:
         f.write("\n".join(transcript))
+    rag_index.ingest_file(
+        transcript_abs,
+        doc_id=hud_id,
+        tags=["huddle", "transcript"],
+        meta={"kind": "HuddleTranscript", "id": hud_id, "topic": topic, "attendees": attendees},
+    )
+    artifacts.add_text(
+        filename=os.path.join("huddles", f"{hud_id}.md"),
+        text="\n".join(transcript),
+        tags=["huddle", "transcript", "md"],
+        meta={"kind": "HuddleTranscript", "id": hud_id},
+    )
+
+    summary_rel = os.path.join(rel_dir, f"{hud_id}.summary.md")
+    summary_abs = os.path.join(run_dir, summary_rel)
     try:
-        rag_index.ingest_file(transcript_abs, doc_id=hud_id)
-    except Exception:
-        pass
+        summary_md = summarize_huddle_markdown(
+            topic=topic,
+            attendees=attendees,
+            questions=questions or [],
+            notes=notes or "",
+            decisions=decisions or [],
+            messages=messages,
+        )
+        with open(summary_abs, "w", encoding="utf-8") as f:
+            f.write(summary_md)
+        rag_index.ingest_text(
+            f"{hud_id}_summary",
+            summary_md,
+            summary_abs,
+            tags=["huddle", "summary"],
+            meta={"kind": "HuddleSummary", "id": hud_id, "topic": topic, "attendees": attendees},
+        )
+        artifacts.add_text(
+            filename=os.path.join("huddles", f"{hud_id}.summary.md"),
+            text=summary_md,
+            tags=["huddle", "summary", "md"],
+            meta={"kind": "HuddleSummary", "id": hud_id},
+        )
+    except OSError:
+        summary_rel = None
 
     rec = HuddleRecord(
         id=hud_id,
         requester=requester,
         attendees=attendees,
         transcript_path=transcript_rel,
+        summary_path=summary_rel,
         decisions=[d.id for d in decisions],
         mode=mode,
         auto_decision=auto_decision,
+        created_ts=_now_iso(),
     )
     record_rel = os.path.join(rel_dir, f"{hud_id}.json")
     record_abs = os.path.join(run_dir, record_rel)
@@ -490,8 +557,6 @@ def decision_injection_text(decisions: List[DecisionSummary]) -> str:
                 lines.append(f"  Contract: {nm} {h}")
         if d.actions:
             for a in d.actions[:3]:
-                try:
+                if isinstance(a, dict):
                     lines.append(f"  Action: {a.get('owner')}: {a.get('task')}")
-                except Exception:
-                    pass
     return "\n".join(lines)

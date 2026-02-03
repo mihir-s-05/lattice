@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import glob
 import json
 import os
 from dataclasses import dataclass, asdict, field
@@ -9,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from .artifacts import ArtifactStore
 from .runlog import RunLogger
 from .constants import DEFAULT_RESULTS_DIR
+from .contracts import ContractRunner
 
 
 @dataclass
@@ -26,29 +28,111 @@ class StageGate:
 
 
 class GateEvaluator:
-    def __init__(self, run_dir: str, artifacts: ArtifactStore, logger: RunLogger) -> None:
+    def __init__(
+        self,
+        run_dir: str,
+        artifacts: ArtifactStore,
+        logger: RunLogger,
+        workspace_root: Optional[str] = None,
+        run_started_at: Optional[float] = None,
+    ) -> None:
         self.run_dir = run_dir
         self.artifacts = artifacts
         self.logger = logger
+        self.workspace_root = workspace_root or os.getcwd()
+        self.run_started_at = run_started_at
         self.latest_tests: Dict[str, str] = {}
+        self.latest_test_metrics: Dict[str, Dict[str, Any]] = {}
+
+    def _active_test_ids(self) -> set[str]:
+        try:
+            runner = ContractRunner(self.run_dir, self.logger, workspace_root=self.workspace_root, run_started_at=self.run_started_at)
+            specs = runner.scan_specs()
+            ids = set()
+            for s in specs:
+                tid = s.get("id")
+                if isinstance(tid, str) and tid.strip():
+                    ids.add(tid.strip())
+            return set(ids)
+        except (OSError, ValueError, TypeError):
+            return set()
 
     def load_test_results(self) -> None:
-        base = os.path.join(self.run_dir, DEFAULT_RESULTS_DIR)
-        if not os.path.isdir(base):
-            return
-        for name in os.listdir(base):
-            if not name.endswith(".json"):
+        self.latest_tests = {}
+        self.latest_test_metrics = {}
+        active_ids = self._active_test_ids()
+        bases = [
+            os.path.join(self.run_dir, DEFAULT_RESULTS_DIR),
+            os.path.join(self.workspace_root, "contracts", "results"),
+        ]
+        for base in bases:
+            if not os.path.isdir(base):
                 continue
-            p = os.path.join(base, name)
+            for name in os.listdir(base):
+                if not name.endswith(".json"):
+                    continue
+                p = os.path.join(base, name)
+                if self.run_started_at:
+                    try:
+                        if os.path.getmtime(p) < self.run_started_at:
+                            continue
+                    except OSError:
+                        continue
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        obj = json.load(f)
+                    tid = obj.get("id")
+                    status = obj.get("status")
+                    if isinstance(tid, str) and isinstance(status, str):
+                        if active_ids and tid not in active_ids and tid not in ("api_contract", "smoke_suite"):
+                            continue
+                        self.latest_tests[tid] = status
+                        met = obj.get("metrics") if isinstance(obj, dict) else None
+                        if isinstance(met, dict):
+                            self.latest_test_metrics[tid] = met
+                except (OSError, json.JSONDecodeError, ValueError, TypeError):
+                    continue
+
+    def _strip_artifacts_prefix(self, pattern: str) -> str:
+        if pattern.startswith("artifacts/"):
+            return pattern[len("artifacts/") :]
+        if pattern.startswith(f"artifacts{os.sep}"):
+            return pattern[len("artifacts") + 1 :]
+        return pattern
+
+    def _glob_exists(self, root: str, pattern: str) -> bool:
+        abs_pat = os.path.join(root, pattern)
+        since = self.run_started_at
+        has_glob = any(ch in pattern for ch in ["*", "?", "[", "]"])
+        candidates: List[str] = []
+        if not has_glob:
+            candidates = [abs_pat]
+        else:
             try:
-                with open(p, "r", encoding="utf-8") as f:
-                    obj = json.load(f)
-                tid = obj.get("id")
-                status = obj.get("status")
-                if isinstance(tid, str) and isinstance(status, str):
-                    self.latest_tests[tid] = status
-            except Exception:
+                candidates = list(glob.glob(abs_pat, recursive=True))
+            except OSError:
+                candidates = []
+        for c in candidates:
+            try:
+                if not os.path.exists(c):
+                    continue
+                if since is None:
+                    return True
+                if os.path.isdir(c):
+                    for r, _d, files in os.walk(c):
+                        for fn in files:
+                            fp = os.path.join(r, fn)
+                            try:
+                                if os.path.getmtime(fp) >= since:
+                                    return True
+                            except OSError:
+                                continue
+                    continue
+                if os.path.getmtime(c) >= since:
+                    return True
+            except OSError:
                 continue
+        return False
 
     def _artifact_exists(self, pattern: str) -> bool:
         pats = [pattern]
@@ -77,10 +161,49 @@ class GateEvaluator:
                     rel = os.path.relpath(os.path.join(root, fn), self.run_dir)
                     if fnmatch.fnmatch(rel, pat):
                         return True
+        for pat in pats:
+            if self._glob_exists(self.run_dir, pat):
+                return True
+        for pat in pats:
+            ws_pat = self._strip_artifacts_prefix(pat)
+            if self._glob_exists(self.workspace_root, ws_pat):
+                return True
         return False
 
     def _tests_pass(self, test_id: str) -> bool:
-        return self.latest_tests.get(test_id) == "passed"
+        status = self.latest_tests.get(test_id)
+        if status is not None:
+            return status == "passed"
+        if test_id == "api_contract":
+            contract_types = {"schema", "api_consistency", "consistency", "openapi_match"}
+            relevant = [
+                tid
+                for tid in self.latest_tests.keys()
+                if (self.latest_test_metrics.get(tid) or {}).get("test_type") in contract_types
+            ]
+            if not relevant:
+                schema_like = [tid for tid in self.latest_tests.keys() if tid.lower().startswith("schema-")]
+                if not schema_like:
+                    return False
+                return all(self.latest_tests.get(tid) == "passed" for tid in schema_like)
+            return all(self.latest_tests.get(tid) == "passed" for tid in relevant)
+        if test_id == "smoke_suite":
+            smoke_types = {"command", "deps", "dependencies", "unit"}
+            relevant = [
+                tid
+                for tid in self.latest_tests.keys()
+                if (self.latest_test_metrics.get(tid) or {}).get("test_type") in smoke_types
+            ]
+            if not relevant:
+                smoke_like = [tid for tid in self.latest_tests.keys() if tid.lower().startswith("smoke-")]
+                if not smoke_like:
+                    return False
+                return all(self.latest_tests.get(tid) == "passed" for tid in smoke_like)
+            return all(self.latest_tests.get(tid) == "passed" for tid in relevant)
+        if test_id == "api_consistency":
+            return any((self.latest_tests.get(tid) == "passed") and ((self.latest_test_metrics.get(tid) or {}).get("test_type") in ("api_consistency", "consistency"))
+                       for tid in self.latest_tests.keys())
+        return False
 
     def _eval_atom(self, expr: str) -> Optional[bool]:
         expr = expr.strip()
@@ -194,7 +317,7 @@ class GateEvaluator:
                                         import hashlib
                                         h = hashlib.sha256(f.read()).hexdigest()
                                     g.evidence.append({"type": "artifact", "id": rel, "hash": f"sha256:{h}"})
-                                except Exception:
+                                except OSError:
                                     g.evidence.append({"type": "artifact", "id": rel})
                         if t.startswith("artifact.exists("):
                             pat = t[len("artifact.exists("):-1].strip("\"' ")

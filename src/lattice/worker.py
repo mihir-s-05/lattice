@@ -99,7 +99,7 @@ class WorkerRunner:
             "Reply ONCE with clarifications and a concrete proposal for the interface/contract. "
             "Do NOT output DecisionSummary JSON. Focus on endpoints, resource schema, tradeoffs, and a brief proposed contract excerpt if applicable."
         )
-        agenda_lines = [f"Huddle Agenda — {topic}"]
+        agenda_lines = [f"Huddle Agenda - {topic}"]
         if questions:
             agenda_lines.append("Questions:")
             for q in questions:
@@ -112,29 +112,31 @@ class WorkerRunner:
         ]
 
         try:
-            w_provider, w_base, w_model, w_raw, w_attempts = call_with_fallback(
+            w_result = call_with_fallback(
                 providers=self.cfg.providers,
                 order=self.cfg.router_provider_order,
                 messages=worker_messages,
                 temperature=self.cfg.temperature,
                 max_tokens=self.cfg.max_tokens,
                 logger=self.logger,
+                retries=self.cfg.limits.retry_count,
+                http_timeout=self.cfg.limits.http_timeout,
+                connect_timeout=self.cfg.limits.connect_timeout,
+                max_retry_delay=self.cfg.limits.max_retry_delay,
+                caller="worker",
+                stage="huddle_worker",
             )
         except ProviderError as e:
             self.logger.log("huddle_error", error=str(e))
             raise
 
-        worker_text = ""
-        try:
-            worker_text = w_raw["choices"][0]["message"].get("content") or ""
-        except Exception:
-            worker_text = str(w_raw)
+        worker_text = w_result.text or ""
 
         if transcript is not None:
             transcript.add_model_call(
                 title="Huddle Worker",
-                provider=w_provider,
-                model=w_model,
+                provider=w_result.provider,
+                model=w_result.model,
                 messages=worker_messages,
                 output=worker_text,
             )
@@ -157,30 +159,32 @@ class WorkerRunner:
         ]
 
         try:
-            r_provider, r_base, r_model, r_raw, r_attempts = call_with_fallback(
+            r_result = call_with_fallback(
                 providers=self.cfg.providers,
                 order=self.cfg.router_provider_order,
                 messages=router_close_messages,
                 temperature=self.cfg.temperature,
                 max_tokens=self.cfg.max_tokens,
                 logger=self.logger,
+                retries=self.cfg.limits.retry_count,
+                http_timeout=self.cfg.limits.http_timeout,
+                connect_timeout=self.cfg.limits.connect_timeout,
+                max_retry_delay=self.cfg.limits.max_retry_delay,
                 tool_choice="none",
+                caller="router",
+                stage="huddle_close",
             )
         except ProviderError as e:
             self.logger.log("huddle_error", error=str(e))
             raise
 
-        router_text = ""
-        try:
-            router_text = r_raw["choices"][0]["message"].get("content") or ""
-        except Exception:
-            router_text = str(r_raw)
+        router_text = r_result.text or ""
 
         if transcript is not None:
             transcript.add_model_call(
                 title="Huddle Router Close",
-                provider=r_provider,
-                model=r_model,
+                provider=r_result.provider,
+                model=r_result.model,
                 messages=router_close_messages,
                 output=router_text,
                 tool_choice="none",
@@ -224,14 +228,14 @@ class WorkerRunner:
             "decisions": decisions,
             "transcript_path": transcript_rel,
             "notes": combined_notes,
-            "worker_provider": w_provider,
-            "worker_model": w_model,
+            "worker_provider": w_result.provider,
+            "worker_model": w_result.model,
             "worker_messages": worker_messages,
-            "worker_raw": w_raw,
-            "router_close_provider": r_provider,
-            "router_close_model": r_model,
+            "worker_raw": w_result.raw,
+            "router_close_provider": r_result.provider,
+            "router_close_model": r_result.model,
             "router_close_messages": router_close_messages,
-            "router_close_raw": r_raw,
+            "router_close_raw": r_result.raw,
         }
 
     def _snapshot_env(self) -> Dict[str, str]:
@@ -297,7 +301,7 @@ class WorkerRunner:
             hits = self.rag_index.search(q, top_k=3)
             try:
                 min_score = float(os.environ.get("LATTICE_RAG_MIN_SCORE", str(DEFAULT_RAG_MIN_SCORE)))
-            except Exception:
+            except (TypeError, ValueError):
                 min_score = DEFAULT_RAG_MIN_SCORE
             filtered_hits = [h for h in (hits or []) if float(h.get("score", 0.0)) >= min_score]
             rag_hits = filtered_hits
@@ -324,15 +328,15 @@ class WorkerRunner:
                     abs_p = os.path.join(self.cwd, rel)
                     if os.path.isfile(abs_p):
                         discovered.append((rel, abs_p))
-                if not discovered:
-                    try:
-                        for name in os.listdir(self.cwd):
-                            if name.lower().startswith("readme") and os.path.isfile(os.path.join(self.cwd, name)):
-                                rel = name
-                                abs_p = os.path.join(self.cwd, name)
-                                discovered.append((rel, abs_p))
-                    except Exception:
-                        pass
+                    if not discovered:
+                        try:
+                            for name in os.listdir(self.cwd):
+                                if name.lower().startswith("readme") and os.path.isfile(os.path.join(self.cwd, name)):
+                                    rel = name
+                                    abs_p = os.path.join(self.cwd, name)
+                                    discovered.append((rel, abs_p))
+                        except OSError:
+                            pass
 
                 if discovered:
                     rag_used = True
@@ -340,20 +344,17 @@ class WorkerRunner:
                         try:
                             with open(abs_p, "r", encoding="utf-8") as f:
                                 content = f.read(2000)
-                        except Exception:
+                        except (OSError, UnicodeDecodeError):
                             continue
                         ctx_parts.append(f"From {rel}:\n{content}")
-                        try:
-                            did = hashlib.sha256((rel + abs_p).encode("utf-8")).hexdigest()[:16]
-                            self.rag_index.ingest_text(did, content, path=abs_p)
-                            rag_hits.append({
-                                "doc_id": did,
-                                "score": 1.0,
-                                "path": abs_p,
-                                "snippet": content[:300],
-                            })
-                        except Exception:
-                            pass
+                        did = hashlib.sha256((rel + abs_p).encode("utf-8")).hexdigest()[:16]
+                        self.rag_index.ingest_text(did, content, path=abs_p)
+                        rag_hits.append({
+                            "doc_id": did,
+                            "score": 1.0,
+                            "path": abs_p,
+                            "snippet": content[:300],
+                        })
 
             if ctx_parts:
                 context_text = ("\n\n".join(ctx_parts))[:1500]
@@ -378,15 +379,20 @@ class WorkerRunner:
         hud_questions: List[str] = []
         hud_contract: Optional[str] = None
         try:
-            provider_name_1, base_url_1, model_1, raw_1, attempts_1 = call_with_fallback(
+            pre_result = call_with_fallback(
                 providers=self.cfg.providers,
                 order=self.cfg.router_provider_order,
                 messages=router_messages,
                 temperature=self.cfg.temperature,
                 max_tokens=self.cfg.max_tokens,
                 logger=self.logger,
+                retries=self.cfg.limits.retry_count,
+                http_timeout=self.cfg.limits.http_timeout,
+                connect_timeout=self.cfg.limits.connect_timeout,
                 tools=tool_schema,
                 tool_choice="auto",
+                caller="router",
+                stage="pre_huddle",
             )
         except ProviderError as e:
             self.logger.log(
@@ -398,20 +404,12 @@ class WorkerRunner:
             )
             raise
 
-        tool_calls = []
-        try:
-            tool_calls = raw_1["choices"][0]["message"].get("tool_calls") or []
-        except Exception:
-            tool_calls = []
-        pre_out = ""
-        try:
-            pre_out = raw_1["choices"][0]["message"].get("content") or ""
-        except Exception:
-            pre_out = ""
+        tool_calls = pre_result.tool_calls or []
+        pre_out = pre_result.text or ""
         transcript.add_model_call(
             title="Router (pre-huddle)",
-            provider=provider_name_1,
-            model=model_1,
+            provider=pre_result.provider,
+            model=pre_result.model,
             messages=router_messages,
             output=pre_out,
             tools_offered=tool_schema,
@@ -420,18 +418,27 @@ class WorkerRunner:
         )
         if tool_calls:
             for tc in tool_calls:
-                try:
-                    fn = tc.get("function", {})
-                    name = fn.get("name")
-                    if name == "huddle.request":
-                        args_raw = fn.get("arguments")
-                        args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
-                        hud_topic = args.get("topic")
-                        hud_questions = args.get("questions") or []
-                        hud_contract = args.get("proposed_contract")
-                        break
-                except Exception:
+                if not isinstance(tc, dict):
                     continue
+                fn = tc.get("function")
+                if not isinstance(fn, dict):
+                    continue
+                if fn.get("name") != "huddle.request":
+                    continue
+                args_raw = fn.get("arguments")
+                if isinstance(args_raw, str):
+                    try:
+                        args = json.loads(args_raw)
+                    except json.JSONDecodeError:
+                        continue
+                elif isinstance(args_raw, dict):
+                    args = args_raw
+                else:
+                    args = {}
+                hud_topic = args.get("topic")
+                hud_questions = args.get("questions") or []
+                hud_contract = args.get("proposed_contract")
+                break
 
         if not hud_topic and any(tok in prompt.lower() for tok in ["api", "rest", "grpc", "interface"]):
             hud_topic = "Interface/API design"
@@ -469,28 +476,40 @@ class WorkerRunner:
             final_messages = router_messages
 
         try:
-            provider_name, base_url, model, raw, attempts = call_with_fallback(
+            final_result = call_with_fallback(
                 providers=self.cfg.providers,
                 order=self.cfg.router_provider_order,
                 messages=final_messages,
                 temperature=self.cfg.temperature,
                 max_tokens=self.cfg.max_tokens,
                 logger=self.logger,
+                retries=self.cfg.limits.retry_count,
+                http_timeout=self.cfg.limits.http_timeout,
+                connect_timeout=self.cfg.limits.connect_timeout,
+                max_retry_delay=self.cfg.limits.max_retry_delay,
                 tool_choice="none",
+                caller="router",
+                stage=("post_huddle" if hud_topic else "final"),
             )
         except ProviderError as e:
             msg = str(e)
             if "tool" in msg.lower() and ("tool" in msg.lower() and "call" in msg.lower()):
                 guarded = list(final_messages)
                 guarded.insert(0, {"role": "system", "content": "Tools are disabled. Do not call any tools. Return plain text only."})
-                provider_name, base_url, model, raw, attempts = call_with_fallback(
+                final_result = call_with_fallback(
                     providers=self.cfg.providers,
                     order=self.cfg.router_provider_order,
                     messages=guarded,
                     temperature=self.cfg.temperature,
                     max_tokens=self.cfg.max_tokens,
                     logger=self.logger,
+                    retries=self.cfg.limits.retry_count,
+                    http_timeout=self.cfg.limits.http_timeout,
+                    connect_timeout=self.cfg.limits.connect_timeout,
+                    max_retry_delay=self.cfg.limits.max_retry_delay,
                     tool_choice="none",
+                    caller="router",
+                    stage="post_huddle_retry",
                 )
                 transcript.add_info(
                     title="Post-huddle model retry",
@@ -506,21 +525,12 @@ class WorkerRunner:
                 )
                 raise
 
-        text = ""
-        try:
-            text = raw["choices"][0]["message"].get("content") or ""
-        except Exception:
-            text = str(raw)
-
-        final_tool_calls = []
-        try:
-            final_tool_calls = raw["choices"][0]["message"].get("tool_calls") or []
-        except Exception:
-            final_tool_calls = []
+        text = final_result.text or ""
+        final_tool_calls = final_result.tool_calls or []
         transcript.add_model_call(
             title=("Router (post-huddle)" if hud_topic else "Router (final)"),
-            provider=provider_name,
-            model=model,
+            provider=final_result.provider,
+            model=final_result.model,
             messages=final_messages,
             output=text,
             tools_offered=None,
@@ -534,14 +544,14 @@ class WorkerRunner:
             text,
             tags=["output", "llm"],
             meta={
-                "provider": provider_name,
-                "model": model,
+                "provider": final_result.provider,
+                "model": final_result.model,
                 "injected_decisions": [getattr(d, "id", None) for d in decisions] if decisions else [],
             },
         )
         try:
             self.rag_index.ingest_text(art.id, text, art.path)
-        except Exception as e:
+        except OSError as e:
             self.logger.log("rag_error", error=str(e))
 
         self.logger.log(
@@ -566,7 +576,7 @@ class WorkerRunner:
                     "injected_decisions": [getattr(d, "id", None) for d in decisions] if decisions else [],
                 },
             )
-        except Exception as e:
+        except OSError as e:
             self.logger.log("transcript_error", error=str(e))
 
         return {
@@ -595,11 +605,8 @@ class WorkerRunner:
                     raw = f.read(DEFAULT_RAG_MAX_FILE_SIZE)
                 digest = hashlib.sha256(raw + path.encode("utf-8")).hexdigest()
                 doc_id = digest[:16]
-            except Exception as e:
+            except OSError as e:
                 self.logger.log("rag_ingest_error", path=path, error=str(e))
                 continue
-            try:
-                self.rag_index.ingest_file(path, doc_id)
-                self.logger.log("rag_ingest", path=path, doc_id=doc_id, bytes=min(len(raw), DEFAULT_RAG_MAX_FILE_SIZE))
-            except Exception as e:
-                self.logger.log("rag_ingest_error", path=path, error=str(e))
+            self.rag_index.ingest_file(path, doc_id)
+            self.logger.log("rag_ingest", path=path, doc_id=doc_id, bytes=min(len(raw), DEFAULT_RAG_MAX_FILE_SIZE))

@@ -26,6 +26,9 @@ from .transcript import RunningTranscript
 from .router_llm import RouterLLM
 from .plan import PlanGraph, PlanNode
 from .constants import DEFAULT_STAGE_GATES
+from .constants import DEFAULT_HUDDLE_DIR
+from .checklist import Checklist, default_router_checklist
+from .errors import ProviderError
 
 
 class ExecutionMode(ABC):
@@ -44,36 +47,21 @@ class ExecutionMode(ABC):
         self.rag = rag
         self.cfg = cfg
 
+        workspace_root = os.path.join(run_dir, "workspace")
+        os.makedirs(workspace_root, exist_ok=True)
+        self.workspace_root = workspace_root
         self.agents = {
-            "frontend": FrontendAgent("frontend", cfg, logger, artifacts, rag),
-            "backend": BackendAgent("backend", cfg, logger, artifacts, rag),
-            "llmapi": LLMApiAgent("llmapi", cfg, logger, artifacts, rag),
-            "tests": TestAgent("tests", cfg, logger, artifacts, rag),
+            "frontend": FrontendAgent("frontend", cfg, logger, artifacts, rag, workspace_root=workspace_root),
+            "backend": BackendAgent("backend", cfg, logger, artifacts, rag, workspace_root=workspace_root),
+            "llmapi": LLMApiAgent("llmapi", cfg, logger, artifacts, rag, workspace_root=workspace_root),
+            "tests": TestAgent("tests", cfg, logger, artifacts, rag, workspace_root=workspace_root),
         }
 
-        self.runner = ContractRunner(run_dir, logger)
-        self.evaluator = GateEvaluator(run_dir, artifacts, logger)
-        tools = [{
-            "type": "function",
-            "function": {
-                "name": "web_search",
-                "description": "Perform a web search via Groq browser_search or a local adapter.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"},
-                        "top_k": {"type": "integer", "minimum": 1, "maximum": 10},
-                        "time_range": {"type": ["string", "null"], "enum": ["d", "w", "m", "y", None]},
-                        "engines": {"type": ["string", "null"]},
-                        "language": {"type": ["string", "null"]},
-                        "pageno": {"type": ["integer", "null"], "minimum": 1},
-                    },
-                    "required": ["query", "top_k"],
-                },
-            },
-        }] if cfg.web_search_enabled else []
-
-        self.rllm = RouterLLM(cfg, logger, tools=tools)
+        import time as _t
+        self._run_started_at = _t.time()
+        self.runner = ContractRunner(run_dir, logger, workspace_root=workspace_root, run_started_at=self._run_started_at)
+        self.evaluator = GateEvaluator(run_dir, artifacts, logger, workspace_root=workspace_root, run_started_at=self._run_started_at)
+        self.rllm = RouterLLM(cfg, logger, tools=[])
 
         self.gates = [
             StageGate(
@@ -82,6 +70,37 @@ class ExecutionMode(ABC):
                 conditions=gate["conditions"]
             ) for gate in DEFAULT_STAGE_GATES
         ]
+        self._touched_files: set[str] = set()
+        self.checklist: Checklist = default_router_checklist()
+        self.artifacts.add_text("checklist.json", self.checklist.to_json(), tags=["checklist"])
+
+    def _record_touched(self, path: str) -> None:
+        rel = os.path.relpath(path, self.workspace_root)
+        if rel and not rel.startswith(".."):
+            self._touched_files.add(os.path.normpath(rel))
+
+    def _agent_context(self, goal: str, decisions: List[DecisionSummary]) -> Dict[str, Any]:
+        huddle_summaries: List[str] = []
+        try:
+            hud_dir = os.path.join(self.run_dir, DEFAULT_HUDDLE_DIR)
+            if os.path.isdir(hud_dir):
+                paths = [os.path.join(hud_dir, n) for n in os.listdir(hud_dir) if n.endswith(".summary.md")]
+                paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+                for p in paths[:3]:
+                    try:
+                        with open(p, "r", encoding="utf-8", errors="replace") as f:
+                            huddle_summaries.append(f.read(3000))
+                    except OSError:
+                        continue
+        except OSError:
+            huddle_summaries = []
+        return {
+            "goal": goal,
+            "decisions": decisions,
+            "checklist_prompt": self.checklist.prompt_summary(),
+            "workspace_files": sorted(list(self._touched_files))[:200],
+            "huddle_summaries": huddle_summaries,
+        }
         
     @abstractmethod
     def execute(self, goal: str, transcript: RunningTranscript) -> Dict[str, Any]:
@@ -124,6 +143,70 @@ class ExecutionMode(ABC):
             
         return decisions
 
+    def _command_is_dangerous(self, cmd: str) -> bool:
+        text = cmd.lower()
+        patterns = [
+            r"\brm\s+-rf\s+/",
+            r"\brm\s+-fr\s+/",
+            r"\brm\s+-r\s+/\b",
+            r"\bdel\s+/s\b",
+            r"\bformat\b",
+            r"\bmkfs\b",
+            r"\bdiskpart\b",
+            r"\bshutdown\b",
+            r"\breboot\b",
+            r"\bpoweroff\b",
+            r"\bdd\s+if=",
+            r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:",
+        ]
+        import re
+        return any(re.search(p, text) for p in patterns)
+
+    def _validate_command(self, cmd: str) -> Optional[str]:
+        if self._command_is_dangerous(cmd):
+            return "command blocked: dangerous pattern detected"
+        policy = getattr(self.cfg, "command_policy", None) if self.cfg else None
+        allowlist = list((policy.allowlist if policy else []) or [])
+        denylist = list((policy.denylist if policy else []) or [])
+
+        lowered = cmd.lower()
+        blocked_tokens = [
+            "curl ",
+            "wget ",
+            "invoke-webrequest",
+            "iwr ",
+            "irm ",
+            "powershell ",
+            "pwsh ",
+            "certutil",
+            "bitsadmin",
+            "ssh ",
+            "scp ",
+            "sftp ",
+            "ftp ",
+            "telnet ",
+            "nc ",
+            "ncat ",
+            "netcat ",
+            "socat ",
+        ]
+        if any(t in lowered for t in blocked_tokens):
+            return "command blocked: network-capable tooling is disabled by default"
+        for d in denylist:
+            if d and d.lower() in lowered:
+                return f"command blocked by denylist entry: {d}"
+
+        if allowlist:
+            head = cmd.strip().split(" ")[0]
+            if not any(head.lower().startswith(a.lower()) for a in allowlist):
+                return "command blocked: not in allowlist"
+        else:
+            head = (cmd.strip().split(" ")[0] if cmd.strip() else "").lower()
+            default_allow = {"python", "py", "pytest", "pip", "pip3", "uv", "poetry", "npm", "node", "npx", "pnpm", "yarn", "git", "rg", "ruff", "black", "mypy", "echo", "dir", "type"}
+            if head and head not in default_allow:
+                return f"command blocked: not in default safe allowlist (head={head}). Configure allowlist to permit."
+        return None
+
 
 class LadderMode(ExecutionMode):
 
@@ -134,7 +217,8 @@ class LadderMode(ExecutionMode):
         active = [self.agents["backend"], self.agents["llmapi"], self.agents["tests"]]
         self._execute_step("contracts", active, goal, decisions, plan_snapshots)
 
-        if any(a.needs_huddle({"goal": goal, "decisions": decisions}) for a in active):
+        ctx = self._agent_context(goal, decisions)
+        if any(a.needs_huddle(ctx) for a in active):
             new_decisions = self._execute_huddle(
                 "API contract alignment",
                 ["Resource fields?", "Endpoints & DTOs?", "Error model?"],
@@ -166,14 +250,18 @@ class LadderMode(ExecutionMode):
         decisions: List[DecisionSummary],
         plan_snapshots: List[Dict[str, Any]]
     ):
-        plans = [a.plan(step_name, {"goal": goal, "decisions": decisions}) for a in active_agents]
+        ctx = self._agent_context(goal, decisions)
+        plans = [a.plan(step_name, ctx) for a in active_agents]
         self.logger.log("router_plans", mode="ladder", step=step_name, plans=[asdict(p) for p in plans])
 
         for agent in active_agents:
-            refs = agent.act({"goal": goal, "decisions": decisions})
+            ctx_local = self._agent_context(goal, decisions)
+            refs = agent.act(ctx_local)
+            for r in refs:
+                self._record_touched(r.path)
             self.logger.log("agent_turn", agent=agent.name, artifacts=[r.path for r in refs])
 
-        results = self.runner.scan_and_run()
+        results = self.runner.scan_and_run(allow_commands=True, command_validator=self._validate_command)
         gate_results = self.evaluator.evaluate(self._get_gates_for_step(step_name))
 
         retries = 0
@@ -181,7 +269,7 @@ class LadderMode(ExecutionMode):
             self.logger.log("router_block", step=step_name, reason="gate_failed",
                           gates=[asdict(g) for g in gate_results])
 
-            results = self.runner.scan_and_run()
+            results = self.runner.scan_and_run(allow_commands=True, command_validator=self._validate_command)
             gate_results = self.evaluator.evaluate(self._get_gates_for_step(step_name))
             retries += 1
 
@@ -211,14 +299,18 @@ class TracksMode(ExecutionMode):
         decisions: List[DecisionSummary] = []
 
         active = list(self.agents.values())
-        plans = [a.plan("tracks", {"goal": goal, "decisions": decisions}) for a in active]
+        ctx = self._agent_context(goal, decisions)
+        plans = [a.plan("tracks", ctx) for a in active]
         self.logger.log("router_plans", mode="tracks", step="slice-1", plans=[asdict(p) for p in plans])
 
         for agent in active:
-            refs = agent.act({"goal": goal, "decisions": decisions})
+            ctx_local = self._agent_context(goal, decisions)
+            refs = agent.act(ctx_local)
+            for r in refs:
+                self._record_touched(r.path)
             self.logger.log("agent_turn", agent=agent.name, artifacts=[r.path for r in refs])
 
-        if any(a.needs_huddle({"goal": goal, "decisions": decisions}) for a in active):
+        if any(a.needs_huddle(ctx) for a in active):
             new_decisions = self._execute_huddle(
                 "Parallel tracks alignment",
                 ["Resource fields?", "Endpoints & DTOs?", "Error model?"],
@@ -228,7 +320,7 @@ class TracksMode(ExecutionMode):
             decisions.extend(new_decisions)
             transcript.add_decision_injection(decision_injection_text(decisions))
 
-        results = self.runner.scan_and_run()
+        results = self.runner.scan_and_run(allow_commands=True, command_validator=self._validate_command)
         gate_results = self.evaluator.evaluate(self.gates)
         
         plan_snapshots.append({
@@ -262,11 +354,15 @@ class WeaveMode(ExecutionMode):
         plan_graph.add_edge("n_backend", "n_smoke")
 
         active_critical = [self.agents["backend"], self.agents["llmapi"], self.agents["tests"]]
-        plans = [a.plan("contracts", {"goal": goal, "decisions": decisions}) for a in active_critical]
+        ctx = self._agent_context(goal, decisions)
+        plans = [a.plan("contracts", ctx) for a in active_critical]
         self.logger.log("router_plans", mode="weave", step="contracts", plans=[asdict(p) for p in plans])
 
         for agent in active_critical:
-            refs = agent.act({"goal": goal, "decisions": decisions})
+            ctx_local = self._agent_context(goal, decisions)
+            refs = agent.act(ctx_local)
+            for r in refs:
+                self._record_touched(r.path)
             self.logger.log("agent_turn", agent=agent.name, artifacts=[r.path for r in refs])
 
         try:
@@ -274,14 +370,14 @@ class WeaveMode(ExecutionMode):
                 {"role": "system", "content": "You are the Docs agent. Write a concise README for the generated CLI app."},
                 {"role": "user", "content": f"Goal: {goal}\n\nWrite a minimal README with: Overview, Quickstart, Commands, and Notes."},
             ])
-            readme_art = self.artifacts.add_text("README.md", doc_out, tags=["docs", "readme"], meta={"segment": "docs"})
-            plan_graph.nodes[-1].evidence.append({"type": "artifact", "id": readme_art.path, "hash": f"sha256:{readme_art.sha256}"})
-            self.logger.log("agent_turn", agent="docs", artifacts=[readme_art.path])
-        except Exception:
+            readme_ref = self.agents["llmapi"]._write_artifact("README.md", doc_out, tags=["docs", "readme"])
+            plan_graph.nodes[-1].evidence.append({"type": "file", "path": readme_ref.path, "hash": f"sha256:{readme_ref.sha256}"})
+            self.logger.log("agent_turn", agent="docs", artifacts=[readme_ref.path])
+        except ProviderError:
             pass
 
-        results = self.runner.scan_and_run()
-        if any(a.needs_huddle({"goal": goal, "decisions": decisions}) for a in active_critical):
+        results = self.runner.scan_and_run(allow_commands=True, command_validator=self._validate_command)
+        if any(a.needs_huddle(ctx) for a in active_critical):
             new_decisions = self._execute_huddle(
                 "Weave mode alignment",
                 ["Resource fields?", "Endpoints & DTOs?", "Error model?"],
@@ -300,10 +396,7 @@ class WeaveMode(ExecutionMode):
             "tests": [asdict(r) for r in results],
         })
 
-        try:
-            plan_graph.save(self.run_dir)
-        except Exception:
-            pass
+        plan_graph.save(self.run_dir)
         
         return {
             "plan_snapshots": plan_snapshots,

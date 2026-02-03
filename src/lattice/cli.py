@@ -3,21 +3,43 @@ import os
 import sys
 import time
 import json
+from json import JSONDecodeError
 
 from .router import RouterRunner
 from .secrets import redact_secrets
 from .constants import get_runs_base_dir
+from .config import ConfigurationFactory
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    prompt = args.prompt
+    prompt = getattr(args, "prompt", None) or getattr(args, "goal", None)
+    if not isinstance(prompt, str) or not prompt.strip():
+        print("ERROR: missing prompt/goal. Use `lattice run \"...\"` or `lattice --goal \"...\"`.")
+        return 2
+    if getattr(args, "provider", None):
+        os.environ["LATTICE_PROVIDER"] = args.provider
     if getattr(args, "router_provider", None):
         os.environ["LATTICE_ROUTER_PROVIDER"] = args.router_provider
     if getattr(args, "router_model", None):
         os.environ["LATTICE_ROUTER_MODEL"] = args.router_model
+    if getattr(args, "model", None):
+        os.environ["OPENAI_MODEL"] = args.model
+        os.environ["LATTICE_ROUTER_MODEL"] = args.model
+        os.environ["LATTICE_AGENT_MODEL"] = args.model
+    if getattr(args, "no_rag", False):
+        os.environ["LATTICE_USE_RAG"] = "0"
     if getattr(args, "huddles", None):
         os.environ["LATTICE_HUDDLES"] = args.huddles
     runner = RouterRunner(cwd=os.getcwd(), no_websearch=getattr(args, "no_websearch", False))
+    run_id = getattr(runner, "run_id", None)
+    run_dir = getattr(runner, "run_dir", None)
+    if isinstance(run_id, str) and run_id and isinstance(run_dir, str) and run_dir:
+        print(f"Starting run: {run_id}")
+        print(f"- run dir:   {run_dir}")
+        print(f"- logs:      {os.path.join(run_dir, 'run.jsonl')}")
+        print(f"- workspace: {os.path.join(run_dir, 'workspace')}")
+        print(f"- follow:    lattice logs {run_id} --follow")
+        sys.stdout.flush()
     try:
         result = runner.run(goal=prompt)
     except Exception as e:
@@ -28,6 +50,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     print("Run complete.")
     print(f"- artifacts: {result.get('artifact_dir')}")
     print(f"- logs:      {result.get('log_path')}")
+    if result.get("workspace_dir"):
+        print(f"- workspace: {result.get('workspace_dir')}")
     if transcript_path and os.path.exists(transcript_path):
         print(f"- transcript:{transcript_path}")
     if summary_path and os.path.exists(summary_path):
@@ -46,7 +70,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                     for line in lf:
                         try:
                             obj = json.loads(line)
-                        except Exception:
+                        except JSONDecodeError:
                             continue
                         if obj.get("event") == "router_llm_turn":
                             router_line = obj
@@ -60,7 +84,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 lm = agent_counts.get("lmstudio", 0)
                 primary = max(((p, c) for p, c in agent_counts.items() if p != "lmstudio"), key=lambda x: x[1], default=("?", 0))[0]
                 print(f"                Agents: {primary} (+ {lm} lmstudio fallbacks)")
-        except Exception:
+        except (OSError, JSONDecodeError, ValueError, TypeError):
             pass
     return 0
 
@@ -102,10 +126,7 @@ def cmd_logs(args: argparse.Namespace) -> int:
                     header = f"[{ts}] {prov} {model}".strip()
                     print(header)
                     print("-" * len(header))
-                    try:
-                        print(out)
-                    except Exception:
-                        sys.stdout.write(str(out) + "\n")
+                    print(str(out))
                     print()
 
             if args.follow:
@@ -113,7 +134,7 @@ def cmd_logs(args: argparse.Namespace) -> int:
                     for line in f:
                         try:
                             obj = json.loads(line)
-                        except Exception:
+                        except JSONDecodeError:
                             continue
                         handle_obj(obj)
                     while True:
@@ -123,7 +144,7 @@ def cmd_logs(args: argparse.Namespace) -> int:
                             continue
                         try:
                             obj = json.loads(line)
-                        except Exception:
+                        except JSONDecodeError:
                             continue
                         handle_obj(obj)
             else:
@@ -131,7 +152,7 @@ def cmd_logs(args: argparse.Namespace) -> int:
                     for line in f:
                         try:
                             obj = json.loads(line)
-                        except Exception:
+                        except JSONDecodeError:
                             continue
                         handle_obj(obj)
             return 0
@@ -150,7 +171,7 @@ def cmd_logs(args: argparse.Namespace) -> int:
                     sys.stdout.write(line)
             sys.stdout.flush()
             return 0
-        except Exception as e:
+        except OSError as e:
             print(f"ERROR reading log: {e}")
             return 1
 
@@ -161,15 +182,12 @@ def _scrub_run_dir(run_dir: str) -> int:
     if os.path.exists(cfg_path):
         try:
             with open(cfg_path, "r", encoding="utf-8") as f:
-                data = f.read()
-            try:
-                obj = redact_secrets(__import__("json").loads(data))
-                with open(cfg_path, "w", encoding="utf-8") as f:
-                    __import__("json").dump(obj, f, indent=2)
-                changed += 1
-            except Exception:
-                pass
-        except Exception:
+                obj = json.load(f)
+            obj = redact_secrets(obj)
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump(obj, f, indent=2)
+            changed += 1
+        except (OSError, JSONDecodeError, ValueError, TypeError):
             pass
     log_path = os.path.join(run_dir, "run.jsonl")
     if os.path.exists(log_path):
@@ -178,15 +196,15 @@ def _scrub_run_dir(run_dir: str) -> int:
             with open(log_path, "r", encoding="utf-8") as f:
                 for line in f:
                     try:
-                        obj = __import__("json").loads(line)
+                        obj = json.loads(line)
                         obj = redact_secrets(obj)
-                        new_lines.append(__import__("json").dumps(obj, ensure_ascii=False))
-                    except Exception:
+                        new_lines.append(json.dumps(obj, ensure_ascii=False))
+                    except JSONDecodeError:
                         new_lines.append(line.rstrip("\n"))
             with open(log_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(new_lines) + "\n")
             changed += 1
-        except Exception:
+        except OSError:
             pass
     return changed
 
@@ -213,16 +231,64 @@ def cmd_scrub(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_csv(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [v.strip() for v in value.split(",") if v.strip()]
+
+
+def cmd_config_show(args: argparse.Namespace) -> int:
+    cfg = ConfigurationFactory.load_user_config()
+    path = ConfigurationFactory._user_config_path()
+    print(f"Config path: {path}")
+    print(json.dumps(cfg or {}, indent=2))
+    return 0
+
+
+def cmd_config_set(args: argparse.Namespace) -> int:
+    cfg = ConfigurationFactory.load_user_config()
+    if not isinstance(cfg, dict):
+        cfg = {}
+    policy = cfg.get("command_policy", {}) if isinstance(cfg.get("command_policy", {}), dict) else {}
+    if args.allowlist is not None:
+        policy["allowlist"] = _parse_csv(args.allowlist)
+    if args.denylist is not None:
+        policy["denylist"] = _parse_csv(args.denylist)
+    cfg["command_policy"] = policy
+    path = ConfigurationFactory.save_user_config(cfg)
+    print(f"Saved config: {path}")
+    print(json.dumps(cfg, indent=2))
+    return 0
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    try:
+        import uvicorn
+    except ImportError:
+        print("ERROR: uvicorn is required to run the server. Install with 'pip install uvicorn'.")
+        return 1
+    if getattr(args, "run_root", None):
+        os.environ["LATTICE_RUN_ROOT"] = args.run_root
+    host = getattr(args, "host", "127.0.0.1")
+    port = int(getattr(args, "port", 5050))
+    print(f"Starting LATTICE API at http://{host}:{port}")
+    uvicorn.run("lattice.server:app", host=host, port=port, log_level="info")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="lattice", description="LATTICE multi-agent router")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     pr = sub.add_parser("run", help="Run a single worker turn")
-    pr.add_argument("prompt", help="Prompt text, wrap in quotes")
+    pr.add_argument("prompt", nargs="?", help="Prompt text, wrap in quotes")
+    pr.add_argument("--goal", dest="goal", help="Alias for prompt text (e.g., lattice --goal \"...\")")
     pr.add_argument("--no-rag", action="store_true", help="Disable RAG for this run")
     pr.add_argument("--no-websearch", action="store_true", help="Force web_search to return tool_unavailable (local adapter disabled)")
+    pr.add_argument("--provider", dest="provider", help="Provider for both router and agents (e.g., openai, groq, lmstudio)", nargs='?')
     pr.add_argument("--router-provider", dest="router_provider", help="Router provider (e.g., groq or lmstudio)", nargs='?')
     pr.add_argument("--router-model", dest="router_model", help="Router model id (e.g., openai/gpt-oss-120b)", nargs='?')
+    pr.add_argument("--model", "-m", dest="model", help="Model to use for both router and agents (e.g., gpt-4o-mini, gpt-4o)")
     pr.add_argument("--huddles", dest="huddles", choices=["dialog", "synthesis"], help="Huddle mode: dialog or synthesis", nargs='?')
     pr.set_defaults(func=cmd_run)
 
@@ -236,11 +302,38 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("run_id", nargs="?", help="Specific run ID to scrub (default: all)")
     ps.set_defaults(func=cmd_scrub)
 
+    pcfg = sub.add_parser("config", help="Show or update persistent config")
+    pcfg_sub = pcfg.add_subparsers(dest="action", required=True)
+    pcfg_show = pcfg_sub.add_parser("show", help="Show current user config")
+    pcfg_show.set_defaults(func=cmd_config_show)
+    pcfg_set = pcfg_sub.add_parser("set", help="Set user config values")
+    pcfg_set.add_argument("--allowlist", dest="allowlist", help="Comma-separated command allowlist")
+    pcfg_set.add_argument("--denylist", dest="denylist", help="Comma-separated command denylist")
+    pcfg_set.set_defaults(func=cmd_config_set)
+
+    pserve = sub.add_parser("serve", help="Launch local API server")
+    pserve.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
+    pserve.add_argument("--port", type=int, default=5050, help="Bind port (default: 5050)")
+    pserve.add_argument(
+        "--run-root",
+        dest="run_root",
+        default=None,
+        help="Runs root directory (default: ~/.lattice/runs)",
+    )
+    pserve.set_defaults(func=cmd_serve)
+
     return p
 
 
 def main(argv=None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
+    known_cmds = {"run", "logs", "scrub", "config", "serve"}
+    if argv and (argv[0] not in known_cmds) and ("--goal" in argv):
+        idx = argv.index("--goal")
+        if idx + 1 < len(argv):
+            goal = argv[idx + 1]
+            rest = argv[:idx] + argv[idx + 2 :]
+            argv = ["run", goal] + rest
     parser = build_parser()
     args = parser.parse_args(argv)
     return args.func(args)

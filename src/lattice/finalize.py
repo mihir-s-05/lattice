@@ -44,32 +44,60 @@ def _collect_test_results(run_dir: str) -> List[Dict[str, Any]]:
         try:
             with open(os.path.join(base, name), "r", encoding="utf-8") as f:
                 out.append(json.load(f))
-        except Exception:
+        except (OSError, json.JSONDecodeError, ValueError, TypeError):
             continue
     return out
 
 
-def _create_deliverables_zip(run_dir: str) -> str:
+def _create_deliverables_zip(run_dir: str, workspace_root: Optional[str] = None, run_started_at: Optional[float] = None) -> str:
     rel = os.path.join("artifacts", "deliverables", DEFAULT_DELIVERABLES_FILE)
     abs_path = os.path.join(run_dir, rel)
     _ensure_dir(os.path.dirname(abs_path))
-    roots = [
-        os.path.join(run_dir, DEFAULT_BACKEND_DIR),
-        os.path.join(run_dir, DEFAULT_FRONTEND_DIR),
-        os.path.join(run_dir, DEFAULT_CONTRACTS_DIR),
+    workspace_root = workspace_root or os.getcwd()
+    roots: List[Tuple[str, str, Optional[float]]] = [
+        (os.path.join(run_dir, DEFAULT_BACKEND_DIR), run_dir, None),
+        (os.path.join(run_dir, DEFAULT_FRONTEND_DIR), run_dir, None),
+        (os.path.join(run_dir, DEFAULT_CONTRACTS_DIR), run_dir, None),
+        (os.path.join(workspace_root, "backend"), workspace_root, run_started_at),
+        (os.path.join(workspace_root, "frontend"), workspace_root, run_started_at),
+        (os.path.join(workspace_root, "public"), workspace_root, run_started_at),
+        (os.path.join(workspace_root, "static"), workspace_root, run_started_at),
+        (os.path.join(workspace_root, "contracts"), workspace_root, run_started_at),
     ]
-    readme = os.path.join(run_dir, "artifacts", "README.md")
+    readme_candidates = [
+        (os.path.join(run_dir, "artifacts", "README.md"), run_dir),
+        (os.path.join(workspace_root, "README.md"), workspace_root),
+        (os.path.join(workspace_root, "readme.md"), workspace_root),
+    ]
     with zipfile.ZipFile(abs_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for root in roots:
+        for root, base, since in roots:
             if not os.path.isdir(root):
                 continue
             for dirpath, _, filenames in os.walk(root):
+                parts = os.path.normpath(dirpath).split(os.sep)
+                if any(p in ("__pycache__", ".pytest_cache", "node_modules", ".venv", "venv", ".git") for p in parts):
+                    continue
                 for fn in filenames:
                     ap = os.path.join(dirpath, fn)
-                    rp = os.path.relpath(ap, run_dir)
+                    if fn.endswith((".pyc", ".pyo")):
+                        continue
+                    if since:
+                        try:
+                            if os.path.getmtime(ap) < (since - 0.1):
+                                continue
+                        except OSError:
+                            continue
+                    rp = os.path.relpath(ap, base)
                     zf.write(ap, rp)
-        if os.path.exists(readme):
-            zf.write(readme, os.path.relpath(readme, run_dir))
+        for readme, base in readme_candidates:
+            if os.path.exists(readme):
+                if run_started_at and base == workspace_root:
+                    try:
+                        if os.path.getmtime(readme) < (run_started_at - 0.1):
+                            continue
+                    except OSError:
+                        continue
+                zf.write(readme, os.path.relpath(readme, base))
     return rel
 
 
@@ -80,15 +108,9 @@ def _write_decision_log_and_citations(run_dir: str, decisions: List[DecisionSumm
     log_abs = os.path.join(run_dir, log_rel)
     lines: List[str] = ["# Decision Log", ""]
     cite_index: Dict[str, List[Dict[str, Any]]] = {}
-    try:
-        from .huddle import _normalize_sources
-    except Exception:
-        _normalize_sources = lambda x: (x or [])
+    from .huddle import _normalize_sources
     for d in decisions:
-        try:
-            d.sources = _normalize_sources(getattr(d, "sources", None))
-        except Exception:
-            pass
+        d.sources = _normalize_sources(getattr(d, "sources", None))
         
         lines.append(f"## {d.topic} ({d.id})")
         if d.decision:
@@ -101,30 +123,18 @@ def _write_decision_log_and_citations(run_dir: str, decisions: List[DecisionSumm
             artifacts = [s for s in (d.sources or []) if isinstance(s, dict) and s.get("type") == "artifact"]
             rags = [s for s in (d.sources or []) if isinstance(s, dict) and s.get("type") == "rag_doc"]
             for s in externals:
-                try:
-                    title = s.get("title")
-                    url = s.get("url")
-                    if title:
-                        lines.append(f"- {title}: {url}")
-                    else:
-                        lines.append(f"- {url}")
-                except Exception:
-                    continue
+                title = s.get("title")
+                url = s.get("url")
+                if title:
+                    lines.append(f"- {title}: {url}")
+                else:
+                    lines.append(f"- {url}")
             for s in artifacts:
-                try:
-                    lines.append(f"- artifact:{s.get('id')} ({s.get('hash','')})")
-                except Exception:
-                    continue
+                lines.append(f"- artifact:{s.get('id')} ({s.get('hash','')})")
             for s in rags:
-                try:
-                    lines.append(f"- rag_doc:{s.get('id')} score={s.get('score')}")
-                except Exception:
-                    continue
-            try:
-                if isinstance(getattr(d, "meta", None), dict) and d.meta.get("auto_populated_sources"):
-                    lines.append("(sources auto-populated from recent web search)")
-            except Exception:
-                pass
+                lines.append(f"- rag_doc:{s.get('id')} score={s.get('score')}")
+            if isinstance(getattr(d, "meta", None), dict) and d.meta.get("auto_populated_sources"):
+                lines.append("(sources auto-populated from recent web search)")
         lines.append("")
         if d.sources:
             cite_index[d.id] = list(d.sources)
@@ -139,38 +149,46 @@ def _write_decision_log_and_citations(run_dir: str, decisions: List[DecisionSumm
     return log_rel, cite_rel
 
 
-def _compute_drift(run_dir: str, decisions: List[DecisionSummary]) -> List[Dict[str, Any]]:
+def _compute_drift(run_dir: str, decisions: List[DecisionSummary], workspace_root: Optional[str] = None) -> List[Dict[str, Any]]:
     drifts: List[Dict[str, Any]] = []
+    workspace_root = workspace_root or os.getcwd()
+    def _hash_for(rel_path: str) -> Optional[str]:
+        h = compute_current_sha256(run_dir, rel_path)
+        if h:
+            return h
+        rel = rel_path
+        if rel.startswith("artifacts/"):
+            rel = rel[len("artifacts/") :]
+        return compute_current_sha256(workspace_root, rel)
     for d in decisions:
         for s in (d.sources or []):
-            try:
-                if s.get("type") == "artifact":
-                    rel = s.get("id") or ""
-                    prev = (s.get("hash") or "").replace("sha256:", "")
-                    now = compute_current_sha256(run_dir, rel)
-                    if prev and now and prev != now:
-                        drifts.append({
-                            "type": "evidence_drift",
-                            "details": f"Artifact changed: {rel}",
-                            "refs": [s],
-                        })
-            except Exception:
+            if not isinstance(s, dict):
                 continue
+            if s.get("type") != "artifact":
+                continue
+            rel = s.get("id") or ""
+            prev = (s.get("hash") or "").replace("sha256:", "")
+            now = _hash_for(rel)
+            if prev and now and prev != now:
+                drifts.append({
+                    "type": "evidence_drift",
+                    "details": f"Artifact changed: {rel}",
+                    "refs": [s],
+                })
     current_openapi = os.path.join(DEFAULT_CONTRACTS_DIR, "openapi.yaml")
-    current_hash = compute_current_sha256(run_dir, current_openapi)
+    current_hash = _hash_for(current_openapi)
     if current_hash:
         for d in decisions:
             for c in d.contracts or []:
-                try:
-                    h = c.get("schema_hash")
-                    if h and h != current_hash:
-                        drifts.append({
-                            "type": "spec_drift",
-                            "details": "OpenAPI hash changed since decision",
-                            "refs": [{"type": "artifact", "id": current_openapi, "hash": f"sha256:{current_hash}"}],
-                        })
-                except Exception:
+                if not isinstance(c, dict):
                     continue
+                h = c.get("schema_hash")
+                if h and h != current_hash:
+                    drifts.append({
+                        "type": "spec_drift",
+                        "details": "OpenAPI hash changed since decision",
+                        "refs": [{"type": "artifact", "id": current_openapi, "hash": f"sha256:{current_hash}"}],
+                    })
     return drifts
 
 
@@ -180,9 +198,11 @@ def run_finalization(
     logger: RunLogger,
     decisions: List[DecisionSummary],
     evaluator: Optional[GateEvaluator] = None,
+    workspace_root: Optional[str] = None,
+    run_started_at: Optional[float] = None,
 ) -> Dict[str, Any]:
     if evaluator is None:
-        evaluator = GateEvaluator(run_dir, artifacts, logger)
+        evaluator = GateEvaluator(run_dir, artifacts, logger, workspace_root=workspace_root)
     evaluator.load_test_results()
 
     tests = _collect_test_results(run_dir)
@@ -195,12 +215,12 @@ def run_finalization(
         decisions = dedupe_decisions(decisions)
         decisions = ensure_provenance_links(decisions)
         validate_decision_integrity(decisions)
-    except Exception as e:
+    except (TypeError, ValueError) as e:
         decision_integrity = {"status": "error", "error": str(e)}
 
-    drift = _compute_drift(run_dir, decisions)
+    drift = _compute_drift(run_dir, decisions, workspace_root=workspace_root)
 
-    zip_rel = _create_deliverables_zip(run_dir)
+    zip_rel = _create_deliverables_zip(run_dir, workspace_root=workspace_root, run_started_at=run_started_at)
 
     dec_log_rel, cite_rel = _write_decision_log_and_citations(run_dir, decisions, logger)
 

@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .runlog import RunLogger
-from .provenance import EvidenceRef
 
 
 @dataclass
@@ -18,8 +17,6 @@ class KnowledgeEvent:
 
 
 class KnowledgeBus:
-    
-
     def __init__(self, run_dir: str, logger: RunLogger) -> None:
         self.run_dir = run_dir
         self.logger = logger
@@ -58,7 +55,7 @@ class KnowledgeBus:
                     ev = self.signal(obj)
                     events.append(ev)
                     self._processed_dropins.add(abs_path)
-            except Exception:
+            except (OSError, json.JSONDecodeError, ValueError, TypeError):
                 continue
         return events
 
@@ -71,6 +68,6 @@ class KnowledgeBus:
                 try:
                     obj = json.loads(line)
                     out.append(KnowledgeEvent(**obj))
-                except Exception:
+                except (json.JSONDecodeError, TypeError):
                     continue
         return out

@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -10,6 +11,7 @@ class RunLogger:
     def __init__(self, run_dir: str) -> None:
         self.run_dir = run_dir
         self.log_path = os.path.join(run_dir, "run.jsonl")
+        self._lock = threading.Lock()
         os.makedirs(run_dir, exist_ok=True)
 
     def _ts(self) -> str:
@@ -19,8 +21,12 @@ class RunLogger:
         rec: Dict[str, Any] = {"ts": self._ts(), "event": event}
         rec.update(redact_secrets(fields))
         line = json.dumps(rec, ensure_ascii=False)
-        with open(self.log_path, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
+        try:
+            with self._lock:
+                with open(self.log_path, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+        except OSError:
+            return
 
     def path(self) -> str:
         return self.log_path

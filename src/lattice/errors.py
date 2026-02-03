@@ -41,11 +41,6 @@ class StageGateError(LatticeError):
         self.gate_id = gate_id
 
 
-class TemplateError(LatticeError):
-
-    def __init__(self, message: str, template_path: Optional[str] = None, context: Optional[Dict[str, Any]] = None):
-        super().__init__(message, context)
-        self.template_path = template_path
 
 
 class RagError(LatticeError):
@@ -92,16 +87,6 @@ def handle_agent_error(e: Exception, agent_name: str) -> AgentError:
     return AgentError(f"Agent '{agent_name}' failed: {e}", agent_name, context)
 
 
-def handle_template_error(e: Exception, template_path: str) -> TemplateError:
-    if isinstance(e, TemplateError):
-        return e
-    
-    context = {
-        "original_error": str(e),
-        "error_type": type(e).__name__
-    }
-    
-    return TemplateError(f"Template '{template_path}' failed: {e}", template_path, context)
 
 
 def handle_rag_error(e: Exception, operation: str) -> RagError:

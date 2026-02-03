@@ -1,0 +1,40 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Virtualenvs
+venv/
+.venv/
+env/
+.env/
+
+# Local environment files (keep example)
+.env.*
+!.env.example
+
+# Local run outputs (generated when running lattice in this repo)
+/_lattice_run_stdout.log
+/_lattice_run_stderr.log
+/notes.db
+/artifacts/
+/reports/
+
+# Optional local runs directory if configured in-repo
+.lattice/
+
+# Build outputs / coverage
+dist/
+build/
+node_modules/
+htmlcov/
+.coverage
+coverage.xml
