@@ -116,7 +116,7 @@ def build_tools_manifest() -> List[Dict[str, Any]]:
             "properties": {
                 "roles": {
                     "type": "array",
-                    "items": {"type": "string", "enum": ["frontend", "backend", "llmapi", "tests"]},
+                    "items": {"type": "string"},
                 },
                 "reason": {"type": "string"},
             },
@@ -174,6 +174,77 @@ def build_tools_manifest() -> List[Dict[str, Any]]:
         {
             "type": "object",
             "properties": {"role": {"type": ["string", "null"]}},
+        },
+    ))
+
+    tools.append(_tool_schema(
+        "list_agent_library",
+        "List the available subagent library (featuresets, toolbox variants, dynamic tools).",
+        {"type": "object", "properties": {}},
+    ))
+
+    tools.append(_tool_schema(
+        "register_featureset",
+        "Create or update an agent tool featureset for toolbox variants.",
+        {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "tool_names": {"type": "array", "items": {"type": "string"}},
+                "prompt_prelude": {"type": ["string", "null"]},
+                "write_policy": {
+                    "type": ["object", "null"],
+                    "properties": {
+                        "allow_globs": {"type": ["array", "null"], "items": {"type": "string"}},
+                        "deny_globs": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+                "scope": {"type": "string", "enum": ["codebase", "global"]},
+            },
+            "required": ["id", "tool_names"],
+        },
+    ))
+
+    tools.append(_tool_schema(
+        "register_toolbox_variant",
+        "Create or update a configurable toolbox subagent variant.",
+        {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "description": {"type": "string"},
+                "tool_names": {"type": "array", "items": {"type": "string"}},
+                "featuresets": {"type": "array", "items": {"type": "string"}},
+                "prompt_prelude": {"type": ["string", "null"]},
+                "write_policy": {
+                    "type": ["object", "null"],
+                    "properties": {
+                        "allow_globs": {"type": ["array", "null"], "items": {"type": "string"}},
+                        "deny_globs": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+                "max_tool_iters": {"type": ["integer", "null"], "minimum": 1, "maximum": 32},
+                "tool_choice": {"type": ["string", "null"]},
+                "temperature": {"type": ["number", "null"]},
+                "model_overrides": {"type": ["object", "null"]},
+                "scope": {"type": "string", "enum": ["codebase", "global"]},
+            },
+            "required": ["id", "description"],
+        },
+    ))
+
+    tools.append(_tool_schema(
+        "register_dynamic_tool",
+        "Create or update a dynamic subagent tool module (Python) that toolbox agents can call.",
+        {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "description": {"type": ["string", "null"]},
+                "code": {"type": "string"},
+                "scope": {"type": "string", "enum": ["codebase", "global"]},
+            },
+            "required": ["name", "code"],
         },
     ))
 

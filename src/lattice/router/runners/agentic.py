@@ -4,7 +4,7 @@ import json
 import os
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from ...agents import BackendAgent, FrontendAgent, LLMApiAgent, TestAgent
+from ...agents import AgentRegistry, BackendAgent, FrontendAgent, LLMApiAgent, TestAgent, ToolboxAgent
 from ...contracts import ContractRunner
 from ...errors import ProviderError
 from ...finalize import run_finalization
@@ -95,22 +95,34 @@ def run_agentic(runner: "RouterRunner", goal: str) -> Dict[str, Any]:
     )
 
     agents: Dict[str, Any] = {}
-
     def ensure_agent(role: str):
-        if role in agents:
-            return agents[role]
-        if role == "frontend":
-            agents[role] = FrontendAgent("frontend", runner.cfg, runner.logger, runner.artifacts, runner.rag, workspace_root=runner.cwd)
-        elif role == "backend":
-            agents[role] = BackendAgent("backend", runner.cfg, runner.logger, runner.artifacts, runner.rag, workspace_root=runner.cwd)
-        elif role == "llmapi":
-            agents[role] = LLMApiAgent("llmapi", runner.cfg, runner.logger, runner.artifacts, runner.rag, workspace_root=runner.cwd)
-        elif role == "tests":
-            agents[role] = TestAgent("tests", runner.cfg, runner.logger, runner.artifacts, runner.rag, workspace_root=runner.cwd)
-        return agents.get(role)
+        r = str(role or "").replace("agent:", "").strip()
+        if not r:
+            return None
+        if r in agents:
+            return agents[r]
+        if r == "frontend":
+            agents[r] = FrontendAgent("frontend", runner.cfg, runner.logger, runner.artifacts, runner.rag, workspace_root=runner.cwd, codebase_root=runner.cwd)
+            return agents[r]
+        if r == "backend":
+            agents[r] = BackendAgent("backend", runner.cfg, runner.logger, runner.artifacts, runner.rag, workspace_root=runner.cwd, codebase_root=runner.cwd)
+            return agents[r]
+        if r == "llmapi":
+            agents[r] = LLMApiAgent("llmapi", runner.cfg, runner.logger, runner.artifacts, runner.rag, workspace_root=runner.cwd, codebase_root=runner.cwd)
+            return agents[r]
+        if r == "tests":
+            agents[r] = TestAgent("tests", runner.cfg, runner.logger, runner.artifacts, runner.rag, workspace_root=runner.cwd, codebase_root=runner.cwd)
+            return agents[r]
+        variant_id = r if r.startswith("toolbox/") else f"toolbox/{r}"
+        spec = AgentRegistry(codebase_root=runner.cwd).materialize_toolbox_variant(variant_id)
+        if spec is None:
+            return None
+        agents[r] = ToolboxAgent(r, runner.cfg, runner.logger, runner.artifacts, runner.rag, workspace_root=runner.cwd, codebase_root=runner.cwd, spec=spec)
+        return agents[r]
 
     def get_agent(role: str):
-        return agents.get(role)
+        r = str(role or "").replace("agent:", "").strip()
+        return agents.get(r)
 
     decisions: List[DecisionSummary] = []
     injected_by_target: Dict[str, List[str]] = {}

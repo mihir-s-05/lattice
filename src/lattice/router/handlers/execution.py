@@ -19,10 +19,8 @@ def schedule_slice(ctx: ToolContext, args: Dict[str, Any]) -> Dict[str, Any]:
 
     actives = [str(x) for x in (args.get("active_agents") or [])]
     parallel = bool(args.get("parallel")) or (runner.mode == "tracks")
-    try:
-        slice_timeout_sec = int(args.get("timeout_sec") or 300)
-    except (TypeError, ValueError):
-        slice_timeout_sec = 300
+    timeout_raw = args.get("timeout_sec")
+    slice_timeout_sec = int(timeout_raw) if isinstance(timeout_raw, (int, float)) else 300
     slice_timeout_sec = max(5, min(1800, slice_timeout_sec))
 
     artifacts_written: List[str] = []
@@ -48,11 +46,10 @@ def schedule_slice(ctx: ToolContext, args: Dict[str, Any]) -> Dict[str, Any]:
         if ag is None:
             return {"agent": an, "error": f"agent not spawned: {an}", "artifacts": [], "report": None, "needs_huddle": False}
 
-        if runner.mode == "tracks" and role in runner._agent_permissions:
-            pol = runner._agent_permissions.get(role) or {}
-            ag.set_write_policy(allow_globs=pol.get("allow_globs"), deny_globs=pol.get("deny_globs"))
-        else:
-            ag.set_write_policy(allow_globs=None, deny_globs=[])
+        if runner.mode == "tracks":
+            pol = runner._agent_permissions.get(role)
+            if isinstance(pol, dict):
+                ag.set_write_policy(allow_globs=pol.get("allow_globs"), deny_globs=pol.get("deny_globs"))
 
         act_ctx = runner._agent_context(ctx.goal, ctx.decisions)
         plan_err = None

@@ -64,6 +64,21 @@ Disable web search:
 lattice run --no-websearch "..."
 ```
 
+## Subagents and agent library
+
+LATTICE’s router can spawn subagents to work in parallel. Built-in roles include `backend`, `frontend`, `llmapi`, and `tests`.
+
+In addition, you can define configurable “toolbox” subagents and dynamic Python tools in your user config (default path: `~/.lattice/config.json`, override with `LATTICE_USER_CONFIG`) under `agent_library`:
+
+- `agent_library.featuresets`: reusable tool bundles for toolbox variants
+- `agent_library.toolbox_variants`: toolbox variants keyed by id (e.g. `toolbox/generalist`)
+- `agent_library.dynamic_tools`: dynamic tool modules (Python) that toolbox agents can call
+
+Dynamic tool modules are loaded from the `agent_library.dynamic_tools.modules` map, where each entry points to a `.py` file that exports:
+
+- `TOOL_SPEC` (dict with `description` and `parameters` JSON schema)
+- `run(ctx, args) -> dict`
+
 ## Local API server (optional)
 
 ```bash
