@@ -23,7 +23,7 @@ Use `.env.example` as a reference and export what you need in your shell.
 ## Run a job
 
 ```bash
-LATTICE_PROVIDER=openai lattice run -m gpt-5-mini "Build and test a personal portfolio website with animations"
+lattice run --provider openai -m gpt-5-mini "Build and test a personal portfolio website with animations"
 ```
 
 PowerShell:
@@ -35,7 +35,7 @@ lattice run -m gpt-5-mini "Build and test a personal portfolio website with anim
 
 Each run prints paths like:
 
-- run dir: `~/.lattice/runs/<run_id>` (Windows: `%USERPROFILE%\.lattice\runs\<run_id>`)
+- run dir: `~/.lattice/runs/<run_id>` (Windows: `%USERPROFILE%\.lattice\runs\<run_id>`; override with `LATTICE_RUNS_DIR`)
 - logs: `run.jsonl`
 - workspace: `workspace/`
 - artifacts: `artifacts/`
@@ -58,6 +58,12 @@ Start from an empty workspace:
 LATTICE_WORKSPACE_SEED=empty lattice run "..."
 ```
 
+Disable web search:
+
+```bash
+lattice run --no-websearch "..."
+```
+
 ## Local API server (optional)
 
 ```bash
@@ -73,4 +79,3 @@ Run tests:
 ```bash
 pytest -q
 ```
-

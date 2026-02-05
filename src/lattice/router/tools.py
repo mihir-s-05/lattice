@@ -2,16 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-
-def _tool_schema(name: str, desc: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": desc,
-            "parameters": params
-        }
-    }
+from ..tool_schema import tool_schema as _tool_schema
 
 
 def build_tools_manifest() -> List[Dict[str, Any]]:

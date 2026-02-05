@@ -11,10 +11,7 @@ from .rag import RagIndex
 from .runlog import RunLogger
 from .config import RunConfig
 from .command_validation import command_is_dangerous, validate_command
-
-
-def _tool_schema(name: str, desc: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    return {"type": "function", "function": {"name": name, "description": desc, "parameters": params}}
+from .tool_schema import tool_schema as _tool_schema
 
 
 def build_agent_tools_manifest() -> List[Dict[str, Any]]:
